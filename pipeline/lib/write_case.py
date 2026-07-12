@@ -1198,7 +1198,7 @@ def main() -> None:
             nCorrectors      1;
             nNonOrthogonalCorrectors 1;
             correctPhi       yes;
-            correctMeshPhi   yes;  # sliding; harmless if unused in MRF
+            correctMeshPhi   yes;
         }
 
         relaxationFactors
