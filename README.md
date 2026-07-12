@@ -7,9 +7,10 @@ Coarse-mesh **transient marine propeller** demonstration (OpenFOAM 11) plus a **
 | File | Description |
 |------|-------------|
 | [`propeller_flow_10s.mp4`](propeller_flow_10s.mp4) | 10 s, 1280×720 flow movie |
-| [`propulsor_efficiency.png`](propulsor_efficiency.png) | Efficiency / thrust / torque vs revolutions |
-| [`propulsor_efficiency.pdf`](propulsor_efficiency.pdf) | Vector plot |
-| [`results/`](results/) | Forces history + CSV |
+| [`propulsor_efficiency.png`](propulsor_efficiency.png) | Efficiency, thrust, and torque **vs time** (3-panel) |
+| [`propulsor_efficiency.pdf`](propulsor_efficiency.pdf) | Vector version of the 3-panel plot |
+| [`propulsor_thrust_torque.png`](propulsor_thrust_torque.png) | Thrust and torque vs time only |
+| [`results/`](results/) | Forces history + CSV + plot copies |
 
 Mean open-water efficiency on this coarse demo: \(\eta_0 \approx 0.56\) (illustrative only).
 

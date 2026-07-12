@@ -81,7 +81,8 @@ Or step by step:
 | Path | Content |
 |------|---------|
 | `movies/propulsor_flow.mp4` | Flow movie |
-| `postProcessing/plots/propulsor_efficiency.png` | Efficiency / thrust / torque |
+| `postProcessing/plots/propulsor_efficiency.png` | Efficiency + thrust + torque **vs time** |
+| `postProcessing/plots/propulsor_thrust_torque.png` | Thrust and torque vs time (2-panel) |
 | `postProcessing/forces/**/forces.dat` | Force history |
 | `pipeline_meta.json` | Domain, timing, mesh knobs used |
 | `log.foamRun` | Solver log |
@@ -278,8 +279,8 @@ CASE_DIR=$PWD/cases/pumpjet_demo
 ROTOR_STL=/path/to/rotor.stl
 STL_SCALE=0.001
 RPM=1200
-ROT_AXIS=0 1 0
-U_INF=0 -4 0
+ROT_AXIS="0 1 0"
+U_INF="0 -4 0"
 MESH_PRESET=demo
 NPROCS=4
 N_REVOLUTIONS=2
@@ -294,11 +295,11 @@ OF_MODE=docker
 ```bash
 CASE_DIR=$PWD/cases/pumpjet_eng
 ROTOR_STL=/path/to/rotor.stl
-STATOR_STLS=/path/to/duct.stl
+STATOR_STLS="/path/to/duct.stl"
 STL_SCALE=0.001
 RPM=1200
-ROT_AXIS=1 0 0
-U_INF=5 0 0
+ROT_AXIS="1 0 0"
+U_INF="5 0 0"
 MESH_PRESET=engineering
 NPROCS=16
 N_REVOLUTIONS=4
