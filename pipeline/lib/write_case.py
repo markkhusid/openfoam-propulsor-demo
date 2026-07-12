@@ -581,7 +581,13 @@ def main() -> None:
             rotzone_feat = ""
             surf_feat_extra = ""
         rotzone_surf = f"""
-{rotzone_surf}
+                rotatingZone
+                {{
+                    level       ({rzone} {rzone});
+                    cellZone    rotatingZone;
+                    faceZone    rotatingZone;
+                    mode        inside;
+                }}
         """
     else:
         rotzone_geom = f"""

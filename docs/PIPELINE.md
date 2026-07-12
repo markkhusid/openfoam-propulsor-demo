@@ -279,16 +279,18 @@ Logs to inspect: `log.blockMesh`, `log.snappyHexMesh`, `log.foamRun`, `log.creat
 | Script | Purpose |
 |--------|---------|
 | `pipeline/00_check_deps.sh` | Host / Docker prerequisites |
-| `pipeline/01_prepare_case.sh` | STL → full OF case dictionaries |
-| `pipeline/02_mesh.sh` | Parallel mesh + sliding interface |
-| `pipeline/03_run.sh` | Parallel transient solve + disk watchdog |
-| `pipeline/04_movie.sh` | pvpython frames → ffmpeg MP4 |
-| `pipeline/05_efficiency.sh` | \(\eta_0\), thrust, torque vs time + CSV |
-| `pipeline/lib/plot_forces.py` | Shared plotting library |
+| `pipeline/01_prepare_case.sh` | STL → full OF case (MRF or sliding) |
+| `pipeline/02_mesh.sh` | Mesh (+ topoSet for MRF / NCC for sliding) |
+| `pipeline/03_run.sh` | Serial or parallel solve + disk watchdog |
+| `pipeline/04_movie.sh` | ParaView or matplotlib frames → MP4 |
+| `pipeline/05_efficiency.sh` | η₀, thrust, torque vs time + CSV |
 | `pipeline/run_all.sh` | End-to-end driver |
-| `pipeline/lib/write_case.py` | Case generator |
+| `pipeline/config.pumpjet.example.env` | Ready config for design/geometry STLs |
+| `pipeline/lib/write_case.py` | Case generator (`ROTATION_MODE`) |
 | `pipeline/lib/stl_utils.py` | STL bbox / scale / watertight check |
 | `pipeline/lib/make_movie.py` | ParaView animation |
+| `pipeline/lib/make_movie_mpl.py` | Matplotlib VTK fallback (no OpenGL) |
+| `pipeline/lib/plot_forces.py` | Shared plotting library |
 
 ---
 
