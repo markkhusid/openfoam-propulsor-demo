@@ -236,51 +236,110 @@ def scalar_from_data(data: dict) -> Tuple[np.ndarray, str]:
     return np.zeros(n), "empty"
 
 
-def _prefer_side_cut(tdir: Path) -> str:
-    """Prefer a longitudinal cut (through-flow plane) over a cross-cut."""
-    # cutB is typically z-normal → shows (x,y) with y = shaft/advance axis
-    for name in ("cutB", "cutA", "yNormal", "zNormal", "rotor"):
-        if (tdir / f"{name}.vtk").is_file():
-            return name
+def _prefer_meridional_cut(tdir: Path) -> str:
+    """
+    Prefer a *meridional* cut (plane containing the shaft axis) for side view.
+
+    For axis ∥ y: cut with normal ∥ z (or x) shows the long through-flow plane.
+    Pick the cut whose points span the *largest streamwise (y) extent*.
+    """
+    candidates = []
+    for name in ("cutA", "cutB", "cutMeridional", "yNormal", "zNormal", "xNormal"):
+        fp = tdir / f"{name}.vtk"
+        if not fp.is_file():
+            continue
+        try:
+            pts = read_legacy_vtk_polydata(fp)["points"]
+        except Exception:
+            continue
+        # y-extent (shaft/advance axis)
+        y_span = float(pts[:, 1].max() - pts[:, 1].min())
+        # face-on cuts have tiny y span; meridional cuts have large y span
+        candidates.append((y_span, name))
+    if candidates:
+        candidates.sort(reverse=True)
+        return candidates[0][1]
     v = list(tdir.glob("*.vtk"))
     if not v:
         raise SystemExit(f"No VTK surfaces in {tdir}")
     return v[0].stem
 
 
-def _flow_plane_coords(pts: np.ndarray, U):
+def _meridional_coords(pts: np.ndarray, U=None, axis_i: int = 1):
     """
-    Map 3D cut to 2D with flow left→right.
+    Project a cut (or body points near a cut) to 2D meridional coordinates.
 
-    Pumpjet convention: freestream U≈(0,-Va,0) so fluid moves +y → −y.
-    Plot horizontal s = −y (upstream left, downstream right) and vertical
-    the remaining in-plane coordinate with largest variance.
+    Horizontal s = −axis_coord so freestream U=(0,−Va,0) flows left→right.
+    Vertical = the in-plane radial-ish coordinate (largest variance among non-axis).
     """
-    # Drop nearly-constant coordinate (cut-plane normal)
+    # Drop the nearly-constant normal direction of a cut plane
     var = pts.var(axis=0)
     drop = int(np.argmin(var))
     keep = [i for i in range(3) if i != drop]
-    # Prefer y as the streamwise axis when present
-    if 1 in keep:
-        stream_i = 1
-        span_i = keep[0] if keep[0] != 1 else keep[1]
-    else:
-        # fall back: largest variance among keep as streamwise
-        stream_i = keep[int(np.argmax(var[keep]))]
-        span_i = keep[0] if keep[0] != stream_i else keep[1]
 
-    # Horizontal: −y so flow (negative Uy freestream) goes left→right
+    if axis_i in keep:
+        stream_i = axis_i
+        span_i = keep[0] if keep[0] != axis_i else keep[1]
+    else:
+        # body cloud may not be flat — force axis as streamwise, pick span by variance
+        stream_i = axis_i
+        others = [i for i in range(3) if i != axis_i]
+        span_i = others[int(np.argmax(var[others]))]
+
+    # Left = upstream (+y for our freestream), right = downstream (−y)
     s = -pts[:, stream_i]
     n = pts[:, span_i]
     xy = np.column_stack([s, n])
 
     u_s = u_n = None
-    if U is not None and U.ndim == 2 and U.shape[1] == 3:
-        # d(s)/dt with s=−y → u_s = −Uy ; span component as-is
-        u_s = -U[:, stream_i]
-        u_n = U[:, span_i]
-    names = (f"streamwise (−y) [m]", f"{'xyz'[span_i]} [m]")
-    return xy, u_s, u_n, names, stream_i, span_i
+    if U is not None:
+        U = np.asarray(U)
+        if U.ndim == 1:
+            U = U.reshape(-1, 3)
+        if U.ndim == 2 and U.shape[1] == 3:
+            u_s = -U[:, stream_i]
+            u_n = U[:, span_i]
+
+    names = (
+        f"streamwise (−{'xyz'[stream_i]}) [m]",
+        f"{'xyz'[span_i]} [m]",
+    )
+    return xy, u_s, u_n, names, stream_i, span_i, drop
+
+
+def _body_silhouette(
+    tdir: Path,
+    stream_i: int,
+    span_i: int,
+    normal_i: int,
+    tol: float = 0.012,
+):
+    """
+    Rotor/stator points near the meridional cut plane only.
+
+    Projecting the *entire* 3D rotor onto the cut axes makes a face-on star
+    (wrong plane). Restricting to |n·x| < tol gives a true side silhouette.
+    """
+    pts_list = []
+    for pat in ("rotor*", "stator*"):
+        for fp in sorted(tdir.glob(f"{pat}.vtk")):
+            try:
+                pts_list.append(read_legacy_vtk_polydata(fp)["points"])
+            except Exception:
+                pass
+    if not pts_list:
+        return None
+    P = np.vstack(pts_list)
+    mask = np.abs(P[:, normal_i]) < tol
+    if mask.sum() < 20:
+        # relax tolerance
+        mask = np.abs(P[:, normal_i]) < max(tol * 3, 0.03)
+    if mask.sum() < 5:
+        return None
+    P = P[mask]
+    s = -P[:, stream_i]
+    n = P[:, span_i]
+    return np.column_stack([s, n])
 
 
 def main():
@@ -293,11 +352,11 @@ def main():
     if len(times) < 2:
         raise SystemExit(f"Need >=2 surface times, found {len(times)}")
 
-    # Prefer full-domain longitudinal cut for left→right through-flow movie
+    # Prefer full-domain *meridional* cut (side view through shaft), not face-on
     style = os.environ.get("MOVIE_STYLE", "flow").lower()
     mid = times[len(times) // 2][1]
     if style in ("flow", "flowfield", "through"):
-        sample_name = _prefer_side_cut(mid)
+        sample_name = _prefer_meridional_cut(mid)
     else:
         sample_name = pick_surface(mid)
     print(f"Using surface series: {sample_name}  ({len(times)} times)  style={style}")
@@ -351,33 +410,14 @@ def main():
     else:
         ua_lo, ua_hi = vmin, vmax
 
-    def body_outline(tdir: Path):
-        pts_list = []
-        for name in ("rotor", "stator0", "stator"):
-            fp = tdir / f"{name}.vtk"
-            if not fp.is_file():
-                # try glob
-                for g in tdir.glob(f"{name}*.vtk"):
-                    fp = g
-                    break
-                else:
-                    continue
-            try:
-                rd = read_legacy_vtk_polydata(fp)
-                pts_list.append(rd["points"])
-            except Exception:
-                pass
-        if not pts_list:
-            return None
-        return np.vstack(pts_list)
-
     w = int(os.environ.get("MOVIE_WIDTH", 1280))
     h = int(os.environ.get("MOVIE_HEIGHT", 720))
     dpi = 100
     fig_w, fig_h = w / dpi, h / dpi
     # Quiver arrows off by default — they clutter the through-flow view.
-    # Set MOVIE_QUIVER=1 to re-enable.
     show_quiver = os.environ.get("MOVIE_QUIVER", "0") in ("1", "true", "yes")
+    # Shaft / advance axis index (y=1 for this pumpjet pipeline)
+    axis_i = int(os.environ.get("MOVIE_AXIS_INDEX", "1"))
 
     for fi, (tval, tdir) in enumerate(times):
         fpath = tdir / f"{sample_name}.vtk"
@@ -390,7 +430,9 @@ def main():
             if U.ndim == 1:
                 U = U.reshape(-1, 3)
 
-        xy, u_s, u_n, axis_labels, stream_i, span_i = _flow_plane_coords(pts, U)
+        xy, u_s, u_n, axis_labels, stream_i, span_i, normal_i = _meridional_coords(
+            pts, U, axis_i=axis_i
+        )
 
         # Color by streamwise speed (distinct freestream → acceleration through jet)
         if u_s is not None:
@@ -410,15 +452,14 @@ def main():
             tcf = ax.tripcolor(
                 tri, scalar, shading="gouraud", cmap="turbo", vmin=cmin, vmax=cmax
             )
-            # Contours make acceleration through the duct more distinct
             try:
                 ax.tricontour(
                     tri,
                     scalar,
-                    levels=12,
+                    levels=10,
                     colors="white",
-                    linewidths=0.35,
-                    alpha=0.35,
+                    linewidths=0.3,
+                    alpha=0.30,
                 )
             except Exception:
                 pass
@@ -427,15 +468,11 @@ def main():
                 xy[:, 0], xy[:, 1], c=scalar, s=6, cmap="turbo", vmin=cmin, vmax=cmax
             )
 
-        # Velocity arrows (subsampled) — show left→right motion through/around unit
         if show_quiver and u_s is not None and u_n is not None and len(xy) > 20:
-            rng = np.random.default_rng(0)
             nq = min(450, len(xy))
-            # Prefer points across the full streamwise extent
             order = np.argsort(xy[:, 0])
             stride = max(1, len(order) // nq)
             idx = order[::stride][:nq]
-            # Fixed-scale arrows so freestream and jet both readable
             speed = np.hypot(u_s[idx], u_n[idx]) + 1e-12
             scale_ref = max(float(np.percentile(speed, 90)), 1e-6)
             ax.quiver(
@@ -453,13 +490,11 @@ def main():
                 zorder=6,
             )
 
-        # Body overlay
-        bp = body_outline(tdir)
-        if bp is not None and len(bp):
-            bxy, _, _, _, _, _ = _flow_plane_coords(bp, None)
-            ax.scatter(bxy[:, 0], bxy[:, 1], s=1.2, c="#101010", alpha=0.7, zorder=5)
+        # Side-view silhouette only (same meridional plane as the cut)
+        bxy = _body_silhouette(tdir, stream_i, span_i, normal_i)
+        if bxy is not None and len(bxy):
+            ax.scatter(bxy[:, 0], bxy[:, 1], s=1.5, c="#0a0a0a", alpha=0.75, zorder=5)
 
-        # Annotate inlet / pumpjet / wake
         smin, smax = float(xy[:, 0].min()), float(xy[:, 0].max())
         nmin, nmax = float(xy[:, 1].min()), float(xy[:, 1].max())
         y_ann = nmax - 0.04 * (nmax - nmin + 1e-12)
@@ -488,9 +523,9 @@ def main():
 
         ax.set_aspect("equal", adjustable="box")
         ax.set_title(
-            f"Pumpjet V3 MRF — through-flow ({sample_name})   t = {tval:.5g} s",
+            f"Pumpjet V3 MRF — meridional through-flow ({sample_name})   t = {tval:.5g} s",
             color="white",
-            fontsize=13,
+            fontsize=12,
         )
         ax.set_xlabel(f"{axis_labels[0]}   (flow left → right)", color="white")
         ax.set_ylabel(axis_labels[1], color="white")
@@ -503,7 +538,8 @@ def main():
         if fi % 10 == 0:
             print(
                 f"frame {fi}/{len(times)} t={tval}  "
-                f"srange={scalar.min():.3g}..{scalar.max():.3g}"
+                f"srange={scalar.min():.3g}..{scalar.max():.3g}  "
+                f"axes stream={'xyz'[stream_i]} span={'xyz'[span_i]}"
             )
 
     n = len(list(frames_dir.glob("frame_*.png")))

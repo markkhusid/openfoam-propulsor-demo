@@ -410,10 +410,22 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     print("Wrote", stats["png"])
     print("Wrote", stats["pdf"])
     print("Wrote", Path(stats["csv"]).parent / "propulsor_thrust_torque.png")
+    # Non-dimensional coeffs (sanity check on thrust magnitude)
+    n = rpm / 60.0
+    if diameter > 0 and rho > 0 and n > 0:
+        KT = stats["T_mean"] / (rho * n**2 * diameter**4 + 1e-30)
+        KQ = abs(stats["Q_mean"]) / (rho * n**2 * diameter**5 + 1e-30)
+        J = va / (n * diameter + 1e-30)
+    else:
+        KT = KQ = J = float("nan")
     print(
         f"eta_mean={stats['eta_mean']:.4f}  eta0_mean={stats.get('eta0_mean', float('nan')):.4f}  "
         f"etap_mean={stats.get('etap_mean', float('nan')):.4f}  "
         f"T_mean={stats['T_mean']:.6g}  Q_mean={stats['Q_mean']:.6g}  |Q|_mean={stats['Q_abs_mean']:.6g}"
+    )
+    print(
+        f"coeffs: J={J:.4f}  KT={KT:.4f}  KQ={KQ:.5f}  "
+        f"(cruise KT typically ~0.05–0.25; KT≫0.4 suggests overload / check ρ_inf)"
     )
 
 

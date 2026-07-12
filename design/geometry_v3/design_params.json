@@ -1,18 +1,19 @@
 {
   "version": 3,
   "D": 0.2,
-  "hub_ratio": 0.27999999999999997,
-  "Zr": 6,
-  "Zs": 9,
-  "pitch_ratio": 1.0,
-  "design_J": 0.75,
-  "tip_clearance_m": 0.003,
-  "duct_length_m": 0.21000000000000002,
-  "rpm": 3200.0,
-  "Va": 8.0,
-  "J": 0.7499999999999999,
+  "hub_ratio": 0.3,
+  "Zr": 5,
+  "Zs": 7,
+  "pitch_ratio": 0.85,
+  "design_J": 0.9,
+  "tip_clearance_m": 0.004,
+  "duct_length_m": 0.165,
+  "rpm": 3000.0,
+  "Va": 9.0,
+  "J": 0.9,
   "rho": 1000.0,
   "target_thrust_N": 100.0,
+  "estimated_thrust_N": 240.00000000000006,
   "target_eta_p": 0.6,
   "nprocs": 6,
   "axis": [
@@ -22,8 +23,8 @@
   ],
   "u_inf": [
     0,
-    -8.0,
+    -9.0,
     0
   ],
-  "notes": "v3: 6-proc MRF, 3200 rpm, Va=8 m/s, \u03c1=1000; target T\u2265100 N and Froude \u03b7_p\u22650.6."
+  "notes": "v3 moderate load: P/D=0.85, J=0.90, 5\u00d77, 3000 rpm, Va\u22489 m/s, \u03c1=1000; aim T~100\u2013300 N (KT~0.06), meridional through-flow viz."
 }

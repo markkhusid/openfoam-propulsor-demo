@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Pumpjet V3 geometry — high-rpm water-density demo (η_p ≥ 0.6, T ≥ 100 N).
+Pumpjet V3 geometry — moderate loading for T ~ 100–300 N at n ≥ 3000 rpm (water).
 
-Delivered operating point (6-proc MRF run):
-  D=0.20 m, 6×9 blades, P/D=1.0, n=3200 rpm, Va=8 m/s (J=0.75), ρ=1000.
+Axis: +y shaft. Freestream U = (0, −Va, 0). Thrust reaction on vehicle ≈ +y.
 
-Headline efficiency is Froude propulsive η_p from CFD thrust (see results README).
+Prior over-pitched design produced KT≈0.65 (T≈3 kN) — far above a 0.2 m
+demo unit. This revision uses lighter pitch/chord so open-water KT ~ 0.05–0.1.
 """
 from __future__ import annotations
 
@@ -82,7 +82,7 @@ def annular_duct(tris, y0, y1, r_in0, r_out0, r_in1, r_out1, n_theta=96):
         add_quad(tris, ii1[j], ii1[i], oo1[i], oo1[j])
 
 
-def airfoil(ch, t_c=0.11, n=20):
+def airfoil(ch, t_c=0.08, n=18):
     xs = np.linspace(0, 1, n)
     yt = (
         5
@@ -110,10 +110,16 @@ def blade(
     pitch_h,
     pitch_t,
     n_span=12,
-    n_sec=20,
-    t_c=0.11,
+    n_sec=18,
+    t_c=0.08,
     invert_chord_axial=True,
 ):
+    """
+    Blade loft. Pitch angle is geometric φ about the radial axis:
+      dy = ± s_ch * cos(φ)   (axial)
+      dz =   s_ch * sin(φ)   (tangential)
+    invert_chord_axial=True → jet sense −y for freestream (0,−Va,0).
+    """
     ax_sign = -1.0 if invert_chord_axial else 1.0
     profs = []
     for s in np.linspace(0, 1, n_span):
@@ -154,63 +160,64 @@ def rot_tris(tris, ang):
 def generate(out_dir: Path) -> dict:
     D = 0.20
     R = 0.5 * D
-    hub_r = 0.028
-    tip_clear = 0.003
+    hub_r = 0.030
+    tip_clear = 0.004
     r_tip = R - tip_clear
-    Zr, Zs = 6, 9
-    J_des = 0.75
-    P_over_D = 1.00
-    aoa = math.radians(3.0)
+    Zr, Zs = 5, 7  # fewer blades → lower solidity / torque
+
+    # Light cruise loading: P/D modest, J high → KT ~ 0.05–0.1 → T ~ 150–350 N
+    J_des = 0.90
+    P_over_D = 0.85  # slightly under geometric match at mid-span for mild load
 
     def pitch_at(r):
         return math.atan(P_over_D * D / (2 * math.pi * max(r, 1e-6)))
 
     rotor: List[Tri] = []
-    cylinder_solid(rotor, -0.022, 0.038, hub_r, 56)
+    cylinder_solid(rotor, -0.018, 0.030, hub_r, 48)
     for i in range(Zr):
         one: List[Tri] = []
         blade(
             one,
-            y_le=-0.005,
+            y_le=-0.002,
             r_hub=hub_r * 1.03,
             r_tip=r_tip,
-            ch_h=0.048,
-            ch_t=0.032,
-            pitch_h=pitch_at(hub_r * 1.15) + aoa,
-            pitch_t=pitch_at(0.72 * R) + aoa * 0.6,
-            n_span=12,
-            n_sec=20,
-            t_c=0.11,
+            ch_h=0.028,  # short chord
+            ch_t=0.018,
+            pitch_h=pitch_at(hub_r * 1.2),
+            pitch_t=pitch_at(0.75 * R),
+            n_span=11,
+            n_sec=16,
+            t_c=0.08,
             invert_chord_axial=True,
         )
         rotor.extend(rot_tris(one, 2 * math.pi * i / Zr))
 
     duct: List[Tri] = []
-    y_in, y_out = -0.07, 0.14
+    y_in, y_out = -0.055, 0.11
     annular_duct(
         duct,
         y_in,
         y_out,
-        r_in0=R + 0.0015,
-        r_out0=R + 0.014,
-        r_in1=0.92 * R,
-        r_out1=0.92 * R + 0.013,
-        n_theta=96,
+        r_in0=R + 0.002,
+        r_out0=R + 0.012,
+        r_in1=0.93 * R,
+        r_out1=0.93 * R + 0.011,
+        n_theta=80,
     )
     for i in range(Zs):
         one = []
         blade(
             one,
-            y_le=0.045,
-            r_hub=hub_r + 0.010,
+            y_le=0.038,
+            r_hub=hub_r + 0.012,
             r_tip=0.90 * R,
-            ch_h=0.036,
-            ch_t=0.028,
-            pitch_h=-(pitch_at(hub_r * 1.3) * 0.85),
-            pitch_t=-(pitch_at(0.7 * R) * 0.70),
-            n_span=10,
-            n_sec=16,
-            t_c=0.10,
+            ch_h=0.024,
+            ch_t=0.018,
+            pitch_h=-(pitch_at(hub_r * 1.3) * 0.70),
+            pitch_t=-(pitch_at(0.7 * R) * 0.50),
+            n_span=8,
+            n_sec=14,
+            t_c=0.08,
             invert_chord_axial=False,
         )
         duct.extend(rot_tris(one, 2 * math.pi * i / Zs + math.pi / Zs))
@@ -219,8 +226,12 @@ def generate(out_dir: Path) -> dict:
     write_binary_stl(out_dir / "rotor.stl", rotor, "rotor")
     write_binary_stl(out_dir / "duct_stator.stl", duct, "duct_stator")
 
-    rpm = 3200.0
-    Va = J_des * (rpm / 60.0) * D
+    rpm = 3000.0  # ≥ 3000
+    n = rpm / 60.0
+    Va = J_des * n * D
+    # Expected T ≈ KT * ρ * n² * D⁴ with KT≈0.06
+    T_est = 0.06 * 1000.0 * (n**2) * (D**4)
+
     meta = {
         "version": 3,
         "D": D,
@@ -233,16 +244,17 @@ def generate(out_dir: Path) -> dict:
         "duct_length_m": y_out - y_in,
         "rpm": rpm,
         "Va": Va,
-        "J": Va / ((rpm / 60.0) * D),
+        "J": Va / (n * D),
         "rho": 1000.0,
         "target_thrust_N": 100.0,
+        "estimated_thrust_N": T_est,
         "target_eta_p": 0.6,
         "nprocs": 6,
         "axis": [0, 1, 0],
         "u_inf": [0, -Va, 0],
         "notes": (
-            "v3: 6-proc MRF, 3200 rpm, Va=8 m/s, ρ=1000; "
-            "target T≥100 N and Froude η_p≥0.6."
+            "v3 moderate load: P/D=0.85, J=0.90, 5×7, 3000 rpm, Va≈9 m/s, "
+            "ρ=1000; aim T~100–300 N (KT~0.06), meridional through-flow viz."
         ),
     }
     (out_dir / "design_params.json").write_text(json.dumps(meta, indent=2))

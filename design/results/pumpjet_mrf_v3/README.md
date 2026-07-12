@@ -1,50 +1,62 @@
-# Pumpjet MRF V3 results (6 processors)
+# Pumpjet MRF V3 (corrected view + force review)
 
-New subdirectory — does **not** overwrite v1/v2 or the root propeller deliverables.
+## Fixes in this revision
 
-## Targets vs achieved
+### 1. Movie plane (was wrong silhouette)
+The black “star” was **not** the flow cut rotated wrong — it was the **3D rotor
+surface projected face-on** (dropping the short axial extent) while the colour
+field was a meridional cut. That looked like a propeller viewed along the shaft.
 
-| Quantity | Target | Achieved (post-startup mean) |
-|----------|--------|-------------------------------|
-| Rotation rate | ≥ 3000 rpm | **3200 rpm** |
-| Thrust \(T\) | ≥ 100 N | **≈ 3380 N** (ρ = 1000 kg/m³) |
-| Efficiency | ≥ 0.6 | **η_p ≈ 0.65** (Froude propulsive) |
-| Processors | 6 | **NPROCS=6** mesh + solve |
-| Movie | clean through-flow | **20 s MP4, no velocity arrows** |
+**Fix:** meridional through-flow only:
+- Prefer the cut with largest **y** (shaft) span (`cutB`, normal ∥ z)
+- Plot **s = −y** horizontal (inlet left → wake right), **x** vertical
+- Body overlay uses only points **near the cut plane** (`|z| < tol`) so the
+  silhouette is a side view of hub/duct/blades, not a face-on star
+- No quiver arrows
 
-### Efficiency definitions (both plotted)
+### 2. Thrust calculation (reviewed)
+OpenFOAM `forces` with `rho rhoInf; rhoInf 1000;` multiplies **kinematic**
+pressure forces by water density — that is correct for incompressible OF.
 
-1. **Froude propulsive efficiency** (headline / target):
-   \[
-   \eta_p = \frac{2}{1+\sqrt{1+C_T}},\quad
-   C_T=\frac{T}{\tfrac12\rho A V_a^2},\quad A=\pi D^2/4
-   \]
-   With the CFD thrust history, **η_p ≈ 0.65 ≥ 0.6**.
+\[
+T = \mathbf{F}\cdot\hat{\mathbf{e}}_{\mathrm{advance}},\quad
+\hat{\mathbf{e}}_{\mathrm{advance}} = -\mathbf{U}_\infty/|\mathbf{U}_\infty|
+= (0,1,0)
+\]
 
-2. **Shaft open-water efficiency** (grey): \(\eta_0 = T V_a / (|Q|\,\omega)\) ≈ **0.22** on this coarse demo mesh.
+\[
+K_T = \frac{T}{\rho n^2 D^4},\quad
+K_Q = \frac{|Q|}{\rho n^2 D^5}
+\]
 
-## Simulation
+| Run | Mean \(T\) | \(K_T\) | Notes |
+|-----|------------|---------|--------|
+| Previous (over-pitched) | ~3300 N | ~0.64 | Overdriven |
+| **This run (moderate load)** | **~1500 N** | **~0.38** | Still high for cruise; see below |
 
-- Rotor Ø **D = 0.20 m**, 6 blades + duct / 9-vane stator  
-- **n = 3200 rpm**, **V_a = 8 m/s**, **ρ = 1000 kg/m³**  
-- MRF, OpenFOAM 11, **6-processor** parallel mesh + `foamRun`  
-- Physical endTime ≈ **0.015 s** (~0.8 rev) — long enough for force settle and ~126 surface samples  
-  (a literal 20 s of CFD at this tip speed is not practical on this VM; the **movie** is 20 s)  
+**Why not ~100 N?** The force **math** is consistent; the **geometry was
+over-loaded**. This revision lowered P/D (0.85), chord, and blade count and
+raised J to 0.9, cutting thrust roughly in half. Hitting exactly ~100 N on a
+coarse demo mesh would need still lighter pitch/solidity or a larger D / lower
+loading. Target line at 100 N remains on the plot for reference.
 
-## Flow movie
+Cruise props often sit at \(K_T\sim 0.05\)–\(0.25\); \(K_T\sim 0.38\) is
+heavy (near bollard-like). Coarse snappy meshes also tend to over-predict
+loading.
 
-`pumpjet_flow_20s.mp4` — 20 s playback, longitudinal cut, streamwise speed colouring,
-inlet → pumpjet → wake, **left → right**. **No quiver arrows** (cleaner view).
+## Operating point (this run)
 
-Previews: `preview_t0.png`, `preview_mid.png`, `preview_end.png`.
+- D = 0.20 m, 5×7 blades, P/D = 0.85  
+- n = **3000 rpm**, Va = **9 m/s** (J = 0.9), ρ = **1000 kg/m³**  
+- **6 processors**, endTime ≈ 0.009 s, **20 s** movie  
 
-## Files
+## Deliverables
 
 | File | Description |
 |------|-------------|
-| `pumpjet_flow_20s.mp4` | 20 s through-flow movie (no arrows) |
-| `propulsor_efficiency.png/.pdf/.csv` | η_p + η₀, thrust, torque |
-| `propulsor_thrust_torque.png/.pdf` | Thrust & torque only |
-| `preview_*.png` | Movie stills |
+| `pumpjet_flow_20s.mp4` | 20 s meridional movie (side view, no arrows) |
+| `preview_*.png` | Stills |
+| `propulsor_efficiency.*` | η_p / η₀, thrust, torque + KT/KQ in log |
+| `forces.dat` | Raw OpenFOAM forces |
 
-Config: `pipeline/config.pumpjet_v3.env` (`MOVIE_QUIVER=0`, `MOVIE_DURATION_SEC=20`, `NPROCS=6`).
+Plots print `J`, `KT`, `KQ` for sanity checks.

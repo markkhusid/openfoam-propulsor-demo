@@ -1021,6 +1021,14 @@ def main() -> None:
                     patches         ("rotor.*");
                     interpolate     true;
                 }}
+
+                // Stationary parts for meridional movie silhouette
+                stator
+                {{
+                    type            patch;
+                    patches         ("stator.*");
+                    interpolate     true;
+                }}
                 {iso_block}
             );
         }}
