@@ -206,8 +206,21 @@ def domain_from_rotor(
     p1 = origin - axis * rot_half
     p2 = origin + axis * rot_half
 
-    # locationInMesh: slightly offset from origin along axis
-    loc = origin + axis * (0.01 * D) + np.array([1e-4, 1e-4, 1e-4])
+    # locationInMesh must lie in the *fluid*, not inside solid CAD.
+    # Place near the domain corner, inset slightly from the outer box.
+    loc = box_min + 0.05 * (box_max - box_min)
+    # Prefer an upstream free-stream pocket along -axis from origin if that stays in the box
+    upstream = origin - axis * (0.6 * up_d * D)
+    if np.all(upstream > box_min + 0.02 * D) and np.all(upstream < box_max - 0.02 * D):
+        # offset off-axis so we are not on a singularity / shaft line
+        off = np.array([1.0, 0.0, 0.0])
+        if abs(np.dot(off, axis)) > 0.9:
+            off = np.array([0.0, 0.0, 1.0])
+        off = off - np.dot(off, axis) * axis
+        off = off / (np.linalg.norm(off) + 1e-15)
+        candidate = upstream + off * (0.35 * rad)
+        if np.all(candidate > box_min) and np.all(candidate < box_max):
+            loc = candidate
 
     return {
         "D": D,

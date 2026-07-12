@@ -42,7 +42,22 @@ def env_vec(name: str, default: str) -> List[float]:
 
 def write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(textwrap.dedent(content).lstrip("\n"))
+    text = textwrap.dedent(content).lstrip("\n")
+    # Guard against accidental unclosed /* ... banners that would comment-out the dict
+    if text.startswith("/*") and "*/" not in text.split("FoamFile", 1)[0]:
+        # Strip broken banner; FoamFile alone is enough for OF11
+        idx = text.find("FoamFile")
+        if idx >= 0:
+            text = text[idx:]
+    path.write_text(text)
+
+
+def foam_header(obj: str, cls: str = "dictionary") -> str:
+    return (
+        f"FoamFile\n{{\n    format      ascii;\n"
+        f"    class       {cls};\n    object      {obj};\n}}\n"
+        "// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //\n"
+    )
 
 
 def main() -> None:
@@ -113,11 +128,14 @@ def main() -> None:
     char_d = os.environ.get("CHAR_DIAMETER", "").strip()
     char_d_f = float(char_d) if char_d else None
 
+    # ROT_ORIGIN from config is used as-is (default 0 0 0 on design axis).
+    # Set USE_BBOX_ORIGIN=1 to centre on the rotor bounding box instead.
+    use_bbox_origin = os.environ.get("USE_BBOX_ORIGIN", "0").strip() in ("1", "true", "yes")
     dom = domain_from_rotor(
         mn,
         mx,
         axis=axis,
-        origin=origin if any(abs(x) > 0 for x in origin) else None,
+        origin=None if use_bbox_origin else origin,
         up_d=env_float("DOMAIN_UPSTREAM_D", 2.0),
         down_d=env_float("DOMAIN_DOWNSTREAM_D", 4.0),
         rad_d=env_float("DOMAIN_RADIUS_D", 2.0),
@@ -498,10 +516,44 @@ def main() -> None:
         """
 
     rc = dom["rot_cylinder"]
+    # Prefer a designed rotatingZone.stl (more robust faceZone) when provided
+    rotzone_stl = geom_dir / "rotatingZone.stl"
+    if not rotzone_stl.is_file():
+        # also accept repo design folder copy named rotatingZone.stl via env
+        cand = os.environ.get("ROTZONE_STL", "").strip()
+        if cand and Path(cand).is_file():
+            import shutil as _shutil
+
+            _shutil.copy2(cand, rotzone_stl)
+    if rotzone_stl.is_file():
+        rotzone_geom = f"""
+            rotatingZone
+            {{
+                type        triSurfaceMesh;
+                file        "rotatingZone.stl";
+            }}
+        """
+        rotzone_feat = f"""
+                {{
+                    file "rotatingZone.eMesh";
+                    level {max(1, rzone - 1)};
+                }}
+        """
+    else:
+        rotzone_geom = f"""
+            rotatingZone
+            {{
+                type        searchableCylinder;
+                point1      {foam_vector(rc['point1'])};
+                point2      {foam_vector(rc['point2'])};
+                radius      {rc['radius']};
+            }}
+        """
+        rotzone_feat = ""
+
     write(
         case / "system" / "snappyHexMeshDict",
         f"""
-        /*--------------------------------*- C++ -*----------------------------------*\\
         FoamFile
         {{
             format      ascii;
@@ -522,13 +574,7 @@ def main() -> None:
                 file        "rotor.stl";
             }}
             {stator_geom}
-            rotatingZone
-            {{
-                type        searchableCylinder;
-                point1      {foam_vector(rc['point1'])};
-                point2      {foam_vector(rc['point2'])};
-                radius      {rc['radius']};
-            }}
+            {rotzone_geom}
         }}
 
         castellatedMeshControls
@@ -546,6 +592,7 @@ def main() -> None:
                     level {rmin};
                 }}
                 {stator_feat}
+                {rotzone_feat}
             );
 
             refinementSurfaces
@@ -640,6 +687,7 @@ def main() -> None:
         """,
     )
 
+    rotzone_feat_name = '"rotatingZone.stl"' if rotzone_stl.is_file() else ""
     write(
         case / "system" / "surfaceFeaturesDict",
         f"""
@@ -654,6 +702,7 @@ def main() -> None:
         (
             "rotor.stl"
             {chr(10).join(f'            "{n}.stl"' for n in stator_names)}
+            {rotzone_feat_name}
         );
 
         includedAngle   150;
@@ -938,13 +987,13 @@ def main() -> None:
 
         gradSchemes
         {
-            default         Gauss linear;
+            default         cellLimited Gauss linear 1;
         }
 
         divSchemes
         {
             default         none;
-            div(phi,U)      Gauss linearUpwind grad(U);
+            div(phi,U)      Gauss limitedLinearV 1;
             div(phi,k)      Gauss upwind;
             div(phi,epsilon) Gauss upwind;
             div((nuEff*dev2(T(grad(U))))) Gauss linear;

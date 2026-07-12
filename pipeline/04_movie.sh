@@ -23,9 +23,19 @@ w="${MOVIE_WIDTH:-1280}"
 h="${MOVIE_HEIGHT:-720}"
 export CASE_DIR MOVIE_FPS MOVIE_WIDTH MOVIE_HEIGHT MOVIE_FIELD
 
-info "Rendering frames with ParaView (pvpython)..."
+info "Rendering frames..."
 cp -f "$DIR/lib/make_movie.py" "$CASE_DIR/make_movie.py"
+set +e
 of_run "export CASE_DIR=/home/openfoam/work MOVIE_FPS=$fps MOVIE_WIDTH=$w MOVIE_HEIGHT=$h MOVIE_FIELD=${MOVIE_FIELD:-U}; pvpython make_movie.py"
+pv_rc=$?
+set -e
+if [[ $pv_rc -ne 0 ]] || ! ls "$CASE_DIR/movies/frames"/frame_*.png >/dev/null 2>&1; then
+  warn "ParaView render failed — using matplotlib VTK fallback"
+  export CASE_DIR fps MOVIE_FPS="$fps" MOVIE_WIDTH="$w" MOVIE_HEIGHT="$h" MOVIE_DURATION_SEC="${MOVIE_DURATION_SEC:-10}"
+  CASE_DIR="$CASE_DIR" MOVIE_FPS="$fps" MOVIE_WIDTH="$w" MOVIE_HEIGHT="$h" \
+    MOVIE_DURATION_SEC="${MOVIE_DURATION_SEC:-10}" \
+    python3 "$DIR/lib/make_movie_mpl.py"
+fi
 
 frames="$CASE_DIR/movies/frames"
 # Normalize any leftover odd names
