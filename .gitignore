@@ -8,6 +8,10 @@ dynamicCode/
 *.OpenFOAM
 *.foam
 
+# Generated cases from the STL pipeline
+cases/
+pipeline/config.env
+
 # Logs / OS
 log.*
 *.log

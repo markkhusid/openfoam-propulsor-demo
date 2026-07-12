@@ -1,68 +1,67 @@
 # OpenFOAM Propulsor Demo
 
-Coarse-mesh **transient marine propeller** case (OpenFOAM 11) run as a VM-sized demonstration of:
+Coarse-mesh **transient marine propeller** demonstration (OpenFOAM 11) plus a **reusable pipeline** for arbitrary **watertight STL** propulsors / pumpjet rotors.
 
-1. Rotating-propulsor CFD with non-conformal sliding interfaces  
-2. Surface sampling for a short engineering **flow movie**  
-3. Force/moment post-processing and **open-water efficiency** \(\eta_0 = T V_a / (Q \omega)\)
-
-> Demo quality (~86k cells, ~2 revolutions). Not a design-grade open-water curve.
-
-## Deliverables
+## Demo deliverables (tutorial propeller, VM run)
 
 | File | Description |
 |------|-------------|
-| [`propeller_flow_10s.mp4`](propeller_flow_10s.mp4) | 10 s, 1280×720 flow movie (mid-plane \(\|U\|\) + blades) |
+| [`propeller_flow_10s.mp4`](propeller_flow_10s.mp4) | 10 s, 1280×720 flow movie |
 | [`propulsor_efficiency.png`](propulsor_efficiency.png) | Efficiency / thrust / torque vs revolutions |
-| [`propulsor_efficiency.pdf`](propulsor_efficiency.pdf) | Vector version of the plot |
-| [`results/forces/forces.dat`](results/forces/forces.dat) | OpenFOAM forces history |
-| [`results/plots/propulsor_efficiency.csv`](results/plots/propulsor_efficiency.csv) | Tabulated efficiency time series |
+| [`propulsor_efficiency.pdf`](propulsor_efficiency.pdf) | Vector plot |
+| [`results/`](results/) | Forces history + CSV |
 
-**Summary (this demo run)**
+Mean open-water efficiency on this coarse demo: \(\eta_0 \approx 0.56\) (illustrative only).
 
-- \(n = 1500\) rpm, \(V_a = 5\) m/s, \(\rho = 1\) (kinematic forces)  
-- Mean \(\eta_0 \approx 0.56\) after startup (\(t \ge 0.02\) s)  
-- Wall time ~1 hour on 4 cores / ~16 GB VM  
+## Pipeline for *your* pumpjet / propulsor STL
 
-## Case layout
-
-```
-0/ system/ constant/   # OpenFOAM case (OF11 incompressibleFluid + solidBody rotation)
-Allmesh Allrun         # Mesh (snappy + NCC) and parallel solve
-run_and_movie.sh       # Disk-capped solve + ParaView/ffmpeg movie pipeline
-make_movie.py          # pvpython frame generation
-encode_movie.sh        # PNG sequence → MP4
-plot_efficiency.py     # Recompute efficiency plots from forces.dat
-```
-
-## How to re-run (OpenFOAM 11 Docker)
-
-Requires Docker image `openfoam/openfoam11-paraview510` and a host helper that mounts the case, or an equivalent OF11 install.
+**Full instructions:** [`docs/PIPELINE.md`](docs/PIPELINE.md)
 
 ```bash
-# Mesh (once)
-./Allmesh
+cp pipeline/config.env.example pipeline/config.env
+# edit ROTOR_STL, RPM, ROT_AXIS, U_INF, MESH_PRESET, MOVIE_DURATION_SEC, ...
 
-# Solve (4 ranks by default in system/decomposeParDict)
-decomposePar -fields -copyZero
-mpirun -np 4 foamRun -parallel
-# optional: reconstructPar
-
-# Efficiency plot (host Python with numpy/matplotlib)
-python3 plot_efficiency.py
+./pipeline/00_check_deps.sh
+./pipeline/run_all.sh pipeline/config.env
 ```
 
-Or use the bundled pipeline script (see `run_and_movie.sh`) if you have the `openfoam` Docker wrapper from the original VM setup.
+Supports:
 
-## Physics notes
+- Arbitrary **watertight** rotor STL (+ optional duct/stator STLs)
+- Mesh presets: `demo` | `engineering` | `fine` | `custom`
+- Movie length 10 / 30 / 60 s (surface sampling scaled to frame count)
+- Docker OpenFOAM 11 or native install
+- Efficiency plot \(\eta_0 = T V_a/(Q\omega)\)
 
-- Solver: `foamRun` / `incompressibleFluid`  
-- Motion: solid-body rotation of `innerCylinder` zone @ 1500 rpm about **y**  
-- Sliding interface: non-conformal couples (`nonCouple1` / `nonCouple2`)  
-- Inlet: \((0,-5,0)\) m/s; advance direction taken as \(+y\) for thrust \(T=F_y\)  
-- Torque: \(|Q|=|M_y|\); \(\omega = 2\pi n\)
+```
+pipeline/
+  00_check_deps.sh
+  01_prepare_case.sh    # STL → case dictionaries
+  02_mesh.sh
+  03_run.sh
+  04_movie.sh
+  05_efficiency.sh
+  run_all.sh
+  config.env.example
+  lib/                  # Python + shell helpers
+docs/PIPELINE.md        # end-to-end manual
+```
+
+## Scaling up
+
+| Machine | Suggested preset | Movie |
+|---------|------------------|-------|
+| 8-core / 16 GB VM | `demo` | 10 s |
+| 16-core / 32–64 GB laptop | `engineering` | 30 s |
+| 32–64 vCPU EC2 / workstation | `fine` | 60 s |
+
+See disk/RAM guidance in [`docs/PIPELINE.md`](docs/PIPELINE.md).
+
+## Legacy demo case scripts
+
+Root-level `Allmesh` / `Allrun` / `make_movie.py` apply to the **included tutorial propeller** case, not the generic STL pipeline.
 
 ## License / attribution
 
-OpenFOAM is GPL. Tutorial geometry originates from the OpenFOAM Foundation tutorial `incompressibleFluid/propeller`.  
-Case tuning, automation, movie, and efficiency post-processing by Mark Khusid.
+OpenFOAM is GPL. Tutorial propeller geometry from the OpenFOAM Foundation.  
+Pipeline automation, demo run, movie, and efficiency post-processing by Mark Khusid.
