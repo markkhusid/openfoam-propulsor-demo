@@ -236,6 +236,53 @@ def scalar_from_data(data: dict) -> Tuple[np.ndarray, str]:
     return np.zeros(n), "empty"
 
 
+def _prefer_side_cut(tdir: Path) -> str:
+    """Prefer a longitudinal cut (through-flow plane) over a cross-cut."""
+    # cutB is typically z-normal → shows (x,y) with y = shaft/advance axis
+    for name in ("cutB", "cutA", "yNormal", "zNormal", "rotor"):
+        if (tdir / f"{name}.vtk").is_file():
+            return name
+    v = list(tdir.glob("*.vtk"))
+    if not v:
+        raise SystemExit(f"No VTK surfaces in {tdir}")
+    return v[0].stem
+
+
+def _flow_plane_coords(pts: np.ndarray, U):
+    """
+    Map 3D cut to 2D with flow left→right.
+
+    Pumpjet convention: freestream U≈(0,-Va,0) so fluid moves +y → −y.
+    Plot horizontal s = −y (upstream left, downstream right) and vertical
+    the remaining in-plane coordinate with largest variance.
+    """
+    # Drop nearly-constant coordinate (cut-plane normal)
+    var = pts.var(axis=0)
+    drop = int(np.argmin(var))
+    keep = [i for i in range(3) if i != drop]
+    # Prefer y as the streamwise axis when present
+    if 1 in keep:
+        stream_i = 1
+        span_i = keep[0] if keep[0] != 1 else keep[1]
+    else:
+        # fall back: largest variance among keep as streamwise
+        stream_i = keep[int(np.argmax(var[keep]))]
+        span_i = keep[0] if keep[0] != stream_i else keep[1]
+
+    # Horizontal: −y so flow (negative Uy freestream) goes left→right
+    s = -pts[:, stream_i]
+    n = pts[:, span_i]
+    xy = np.column_stack([s, n])
+
+    u_s = u_n = None
+    if U is not None and U.ndim == 2 and U.shape[1] == 3:
+        # d(s)/dt with s=−y → u_s = −Uy ; span component as-is
+        u_s = -U[:, stream_i]
+        u_n = U[:, span_i]
+    names = (f"streamwise (−y) [m]", f"{'xyz'[span_i]} [m]")
+    return xy, u_s, u_n, names, stream_i, span_i
+
+
 def main():
     case = Path(os.environ.get("CASE_DIR", ".")).resolve()
     surf = case / "postProcessing" / "surfaces"
@@ -246,18 +293,23 @@ def main():
     if len(times) < 2:
         raise SystemExit(f"Need >=2 surface times, found {len(times)}")
 
-    sample_name = pick_surface(times[len(times) // 2][1])
-    print(f"Using surface series: {sample_name}  ({len(times)} times)")
+    # Prefer full-domain longitudinal cut for left→right through-flow movie
+    style = os.environ.get("MOVIE_STYLE", "flow").lower()
+    mid = times[len(times) // 2][1]
+    if style in ("flow", "flowfield", "through"):
+        sample_name = _prefer_side_cut(mid)
+    else:
+        sample_name = pick_surface(mid)
+    print(f"Using surface series: {sample_name}  ({len(times)} times)  style={style}")
 
     # Validate field parse
-    probe = read_legacy_vtk_polydata(times[len(times) // 2][1] / f"{sample_name}.vtk")
+    probe = read_legacy_vtk_polydata(mid / f"{sample_name}.vtk")
     print("Field keys:", list(probe["data"].keys()), "pts", probe["points"].shape)
     sc0, label = scalar_from_data(probe)
     print(f"scalar {label}: min={sc0.min():.4g} max={sc0.max():.4g} mean={sc0.mean():.4g}")
     if sc0.max() - sc0.min() < 1e-12:
-        # try cutB
         for alt in ("cutB", "cutA", "rotor"):
-            fp = times[len(times) // 2][1] / f"{alt}.vtk"
+            fp = mid / f"{alt}.vtk"
             if fp.is_file() and alt != sample_name:
                 probe = read_legacy_vtk_polydata(fp)
                 sc0, label = scalar_from_data(probe)
@@ -271,88 +323,186 @@ def main():
     for old in frames_dir.glob("frame_*.png"):
         old.unlink()
 
-    # Color limits from several samples
+    # Color limits from several samples (avoid startup-only range)
     samples = []
+    u_ax_samples = []
     for idx in [0, len(times) // 4, len(times) // 2, 3 * len(times) // 4, -1]:
         fp = times[idx][1] / f"{sample_name}.vtk"
-        if fp.is_file():
-            sc, _ = scalar_from_data(read_legacy_vtk_polydata(fp))
-            samples.append(sc)
+        if not fp.is_file():
+            continue
+        d = read_legacy_vtk_polydata(fp)
+        sc, _ = scalar_from_data(d)
+        samples.append(sc)
+        U = d["data"].get("U")
+        if U is not None:
+            U = np.asarray(U)
+            if U.ndim == 1:
+                U = U.reshape(-1, 3)
+            # axial freestream component Uy (flow is −y)
+            u_ax_samples.append(-U[:, 1])
     allsc = np.concatenate(samples) if samples else sc0
-    vmin, vmax = np.percentile(allsc, [5, 95])
+    vmin, vmax = np.percentile(allsc, [2, 98])
     if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
         vmin, vmax = float(np.min(allsc)), float(np.max(allsc) + 1e-6)
+    # Streamwise speed color band for distinct jet vs freestream
+    if u_ax_samples:
+        ua = np.concatenate(u_ax_samples)
+        ua_lo, ua_hi = np.percentile(ua, [2, 98])
+    else:
+        ua_lo, ua_hi = vmin, vmax
 
-    # Also load rotor outline for overlay if available
-    def rotor_outline(tdir: Path):
-        fp = tdir / "rotor.vtk"
-        if not fp.is_file():
+    def body_outline(tdir: Path):
+        pts_list = []
+        for name in ("rotor", "stator0", "stator"):
+            fp = tdir / f"{name}.vtk"
+            if not fp.is_file():
+                # try glob
+                for g in tdir.glob(f"{name}*.vtk"):
+                    fp = g
+                    break
+                else:
+                    continue
+            try:
+                rd = read_legacy_vtk_polydata(fp)
+                pts_list.append(rd["points"])
+            except Exception:
+                pass
+        if not pts_list:
             return None
-        try:
-            rd = read_legacy_vtk_polydata(fp)
-            return rd["points"]
-        except Exception:
-            return None
+        return np.vstack(pts_list)
 
     w = int(os.environ.get("MOVIE_WIDTH", 1280))
     h = int(os.environ.get("MOVIE_HEIGHT", 720))
     dpi = 100
     fig_w, fig_h = w / dpi, h / dpi
+    show_quiver = os.environ.get("MOVIE_QUIVER", "1") not in ("0", "false", "no")
 
     for fi, (tval, tdir) in enumerate(times):
         fpath = tdir / f"{sample_name}.vtk"
         data = read_legacy_vtk_polydata(fpath)
         pts = data["points"]
         tris = data["tris"]
-        scalar, label = scalar_from_data(data)
+        U = data["data"].get("U")
+        if U is not None:
+            U = np.asarray(U)
+            if U.ndim == 1:
+                U = U.reshape(-1, 3)
 
-        var = pts.var(axis=0)
-        drop = int(np.argmin(var))
-        keep = [i for i in range(3) if i != drop]
-        xy = pts[:, keep]
-        axis_names = ["x", "y", "z"]
+        xy, u_s, u_n, axis_labels, stream_i, span_i = _flow_plane_coords(pts, U)
+
+        # Color by streamwise speed (distinct freestream → acceleration through jet)
+        if u_s is not None:
+            scalar = u_s
+            label = r"streamwise speed $u_s=-U_y$ [m/s]"
+            cmin, cmax = ua_lo, ua_hi
+        else:
+            scalar, label = scalar_from_data(data)
+            cmin, cmax = vmin, vmax
 
         fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
-        fig.patch.set_facecolor("#0b0f14")
-        ax.set_facecolor("#101820")
+        fig.patch.set_facecolor("#070b10")
+        ax.set_facecolor("#0c121a")
 
         if len(tris) > 0 and tris.max() < len(pts):
             tri = Triangulation(xy[:, 0], xy[:, 1], tris)
             tcf = ax.tripcolor(
-                tri, scalar, shading="gouraud", cmap="turbo", vmin=vmin, vmax=vmax
+                tri, scalar, shading="gouraud", cmap="turbo", vmin=cmin, vmax=cmax
             )
+            # Contours make acceleration through the duct more distinct
+            try:
+                ax.tricontour(
+                    tri,
+                    scalar,
+                    levels=12,
+                    colors="white",
+                    linewidths=0.35,
+                    alpha=0.35,
+                )
+            except Exception:
+                pass
         else:
             tcf = ax.scatter(
-                xy[:, 0], xy[:, 1], c=scalar, s=6, cmap="turbo", vmin=vmin, vmax=vmax
+                xy[:, 0], xy[:, 1], c=scalar, s=6, cmap="turbo", vmin=cmin, vmax=cmax
             )
 
-        # Overlay rotor surface points (black edges)
-        rp = rotor_outline(tdir)
-        if rp is not None and len(rp):
-            rxy = rp[:, keep]
-            ax.scatter(rxy[:, 0], rxy[:, 1], s=1, c="#111111", alpha=0.55, zorder=5)
+        # Velocity arrows (subsampled) — show left→right motion through/around unit
+        if show_quiver and u_s is not None and u_n is not None and len(xy) > 20:
+            rng = np.random.default_rng(0)
+            nq = min(450, len(xy))
+            # Prefer points across the full streamwise extent
+            order = np.argsort(xy[:, 0])
+            stride = max(1, len(order) // nq)
+            idx = order[::stride][:nq]
+            # Fixed-scale arrows so freestream and jet both readable
+            speed = np.hypot(u_s[idx], u_n[idx]) + 1e-12
+            scale_ref = max(float(np.percentile(speed, 90)), 1e-6)
+            ax.quiver(
+                xy[idx, 0],
+                xy[idx, 1],
+                u_s[idx] / scale_ref,
+                u_n[idx] / scale_ref,
+                color="white",
+                alpha=0.75,
+                scale=28,
+                width=0.0022,
+                headwidth=3.5,
+                headlength=4.0,
+                pivot="mid",
+                zorder=6,
+            )
 
-        cb = fig.colorbar(tcf, ax=ax, fraction=0.046, pad=0.04)
+        # Body overlay
+        bp = body_outline(tdir)
+        if bp is not None and len(bp):
+            bxy, _, _, _, _, _ = _flow_plane_coords(bp, None)
+            ax.scatter(bxy[:, 0], bxy[:, 1], s=1.2, c="#101010", alpha=0.7, zorder=5)
+
+        # Annotate inlet / pumpjet / wake
+        smin, smax = float(xy[:, 0].min()), float(xy[:, 0].max())
+        nmin, nmax = float(xy[:, 1].min()), float(xy[:, 1].max())
+        y_ann = nmax - 0.04 * (nmax - nmin + 1e-12)
+        for xpos, txt in (
+            (smin + 0.08 * (smax - smin), "INLET →"),
+            (0.5 * (smin + smax), "PUMPJET"),
+            (smax - 0.12 * (smax - smin), "→ WAKE"),
+        ):
+            ax.text(
+                xpos,
+                y_ann,
+                txt,
+                color="#e8f0ff",
+                fontsize=11,
+                ha="center",
+                va="top",
+                fontweight="bold",
+                alpha=0.9,
+                zorder=8,
+            )
+
+        cb = fig.colorbar(tcf, ax=ax, fraction=0.035, pad=0.02)
         cb.set_label(label, color="white")
         cb.ax.yaxis.set_tick_params(color="white")
         plt.setp(plt.getp(cb.ax.axes, "yticklabels"), color="white")
 
         ax.set_aspect("equal", adjustable="box")
         ax.set_title(
-            f"Pumpjet MRF — {sample_name}   t = {tval:.5g} s",
+            f"Pumpjet V3 MRF — through-flow ({sample_name})   t = {tval:.5g} s",
             color="white",
-            fontsize=14,
+            fontsize=13,
         )
-        ax.set_xlabel(f"{axis_names[keep[0]]} [m]", color="white")
-        ax.set_ylabel(f"{axis_names[keep[1]]} [m]", color="white")
+        ax.set_xlabel(f"{axis_labels[0]}   (flow left → right)", color="white")
+        ax.set_ylabel(axis_labels[1], color="white")
         ax.tick_params(colors="white")
         for spine in ax.spines.values():
-            spine.set_color("#444444")
+            spine.set_color("#445566")
         fig.tight_layout()
         fig.savefig(frames_dir / f"frame_{fi:04d}.png", dpi=dpi, facecolor=fig.get_facecolor())
         plt.close(fig)
         if fi % 10 == 0:
-            print(f"frame {fi}/{len(times)} t={tval}  srange={scalar.min():.3g}..{scalar.max():.3g}")
+            print(
+                f"frame {fi}/{len(times)} t={tval}  "
+                f"srange={scalar.min():.3g}..{scalar.max():.3g}"
+            )
 
     n = len(list(frames_dir.glob("frame_*.png")))
     print("frames", n)

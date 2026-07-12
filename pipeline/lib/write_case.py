@@ -1102,13 +1102,15 @@ def main() -> None:
         gradSchemes
         {
             default         cellLimited Gauss linear 1;
+            limited         cellLimited Gauss linear 1;
+            grad(U)         cellLimited Gauss linear 1;
         }
 
         divSchemes
         {
             default         none;
-            // Stable on coarse/non-ortho MRF demo meshes
-            div(phi,U)      Gauss upwind;
+            // linearUpwind: less numerical drag than pure upwind (better η)
+            div(phi,U)      Gauss linearUpwind limited;
             div(phi,k)      Gauss upwind;
             div(phi,epsilon) Gauss upwind;
             div((nuEff*dev2(T(grad(U))))) Gauss linear;

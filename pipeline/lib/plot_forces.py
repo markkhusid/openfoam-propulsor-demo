@@ -5,6 +5,7 @@ Plot propulsor efficiency, thrust, and torque vs time from OpenFOAM forces.dat.
 Usage:
   plot_forces.py --forces path/to/forces.dat --out-dir path/to/plots \\
       [--rpm 1500] [--axis 0 1 0] [--u-inf 0 -5 0] [--meta pipeline_meta.json]
+      [--rho 1000] [--diameter 0.2]
 """
 from __future__ import annotations
 
@@ -28,6 +29,18 @@ PAT = re.compile(
 
 def vec3(s: str) -> np.ndarray:
     return np.array([float(x) for x in s.split()], dtype=float)
+
+
+def froude_efficiency(T: np.ndarray, va: float, rho: float, diameter: float) -> np.ndarray:
+    """Ideal propulsive (Froude) efficiency from thrust loading.
+
+    η_p = 2 / (1 + sqrt(1 + C_T)),  C_T = T / (½ ρ A V_a²),  A = π D²/4.
+    This is the classical jet-propulsor figure of merit for a given thrust.
+    """
+    A = 0.25 * np.pi * max(diameter, 1e-9) ** 2
+    dyn = 0.5 * rho * va * va * A
+    ct = np.where((dyn > 1e-15) & (T > 0), T / dyn, np.nan)
+    return 2.0 / (1.0 + np.sqrt(1.0 + ct))
 
 
 def load_forces(
@@ -74,17 +87,12 @@ def load_forces(
 
 
 def _ss_mask(t: np.ndarray) -> np.ndarray:
-    """Post-startup window for mean stats (last ~75% of the run).
-
-    Uses a relative threshold so short demos (endTime << 0.02 s) still get
-    valid mean lines; longer runs skip the initial transient fraction.
-    """
+    """Post-startup window for mean stats (last ~75% of the run)."""
     if len(t) == 0:
         return np.array([], dtype=bool)
     t_end = float(t[-1])
     if t_end <= 0:
         return np.ones_like(t, dtype=bool)
-    # Drop early transient: max(25% of run, but never more than 75% of run)
     t0 = min(0.25 * t_end, max(0.0, t_end - 1e-12))
     return t >= t0
 
@@ -110,15 +118,39 @@ def plot_performance(
     va: float,
     out_dir: Path,
     title_suffix: str = "",
+    eta_p: Optional[np.ndarray] = None,
+    primary: str = "shaft",
 ) -> dict:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mask = _ss_mask(t)
-    valid = np.isfinite(eta[mask]) & (eta[mask] > 0) & (eta[mask] < 2.0) if mask.any() else np.array([], dtype=bool)
-    eta_mean = float(np.mean(eta[mask][valid])) if valid.any() else float("nan")
-    eta_med = float(np.median(eta[mask][valid])) if valid.any() else float("nan")
-    eta_last = float(eta[np.isfinite(eta)][-1]) if np.isfinite(eta).any() else float("nan")
+
+    def _stats(arr: np.ndarray, lo: float = 0.0, hi: float = 2.0):
+        if not mask.any():
+            return float("nan"), float("nan"), float("nan")
+        v = arr[mask]
+        ok = np.isfinite(v) & (v > lo) & (v < hi)
+        if not ok.any():
+            return float("nan"), float("nan"), float("nan")
+        return float(np.mean(v[ok])), float(np.median(v[ok])), float(v[ok][-1])
+
+    # Primary efficiency for headline stats / mean lines
+    if primary == "froude" and eta_p is not None:
+        eta_plot = eta_p
+        eta_label = r"Froude propulsive $\eta_p=2/(1+\sqrt{1+C_T})$"
+        eta_yl = r"Efficiency $\eta_p$ [-]"
+    else:
+        eta_plot = eta
+        eta_label = r"Shaft $\eta_0=T V_a/(Q\omega)$"
+        eta_yl = r"Efficiency $\eta_0$ [-]"
+
+    eta_mean, eta_med, eta_last = _stats(eta_plot)
+    eta0_mean, _, eta0_last = _stats(eta)
+    etap_mean = etap_med = etap_last = float("nan")
+    if eta_p is not None:
+        etap_mean, etap_med, etap_last = _stats(eta_p)
+
     T_mean = float(np.mean(T[mask])) if mask.any() else float("nan")
     Q_mean = float(np.mean(Q[mask])) if mask.any() else float("nan")
     Q_abs_mean = float(np.mean(np.abs(Q[mask]))) if mask.any() else float("nan")
@@ -127,11 +159,14 @@ def plot_performance(
     # CSV
     csv_path = out_dir / "propulsor_efficiency.csv"
     with csv_path.open("w") as f:
-        f.write("time_s,revolutions,thrust,torque,torque_abs,efficiency\n")
+        f.write("time_s,revolutions,thrust,torque,torque_abs,eta0_shaft,eta_p_froude\n")
         for i in range(len(t)):
-            e = f"{eta[i]:.8g}" if np.isfinite(eta[i]) else ""
+            e0 = f"{eta[i]:.8g}" if np.isfinite(eta[i]) else ""
+            ep = ""
+            if eta_p is not None and np.isfinite(eta_p[i]):
+                ep = f"{eta_p[i]:.8g}"
             f.write(
-                f"{t[i]:.8g},{rev[i]:.8g},{T[i]:.8g},{Q[i]:.8g},{abs(Q[i]):.8g},{e}\n"
+                f"{t[i]:.8g},{rev[i]:.8g},{T[i]:.8g},{Q[i]:.8g},{abs(Q[i]):.8g},{e0},{ep}\n"
             )
 
     plt.rcParams.update(
@@ -150,11 +185,10 @@ def plot_performance(
         1,
         figsize=(11, 9.5),
         sharex=True,
-        gridspec_kw={"height_ratios": [1.25, 1.1, 1.1], "hspace": 0.14},
+        gridspec_kw={"height_ratios": [1.35, 1.1, 1.1], "hspace": 0.14},
     )
 
     def add_rev_axis(ax):
-        """Secondary x-axis in revolutions (top)."""
         if len(t) < 2 or t[-1] <= t[0]:
             return None
         ax_top = ax.twiny()
@@ -165,14 +199,28 @@ def plot_performance(
 
     # --- Efficiency vs time ---
     ax = axes[0]
-    ax.plot(t, eta, color="#0b5cab", lw=1.6, label=r"Open-water $\eta_0 = T V_a / (Q \omega)$")
-    if np.isfinite(eta_mean):
-        ax.axhline(eta_mean, color="#c0392b", ls="--", lw=1.25, label=fr"Mean (post-startup): {eta_mean:.3f}")
-    if np.isfinite(eta_med):
-        ax.axhline(eta_med, color="#1e8449", ls=":", lw=1.35, label=fr"Median (post-startup): {eta_med:.3f}")
-    ax.set_ylabel(r"Efficiency $\eta_0$ [-]")
-    ax.set_ylim(0.0, 1.0)
-    ax.legend(loc="lower right", framealpha=0.95)
+    if eta_p is not None:
+        ax.plot(t, eta_p, color="#0b5cab", lw=2.0, label=r"Froude propulsive $\eta_p$")
+        ax.plot(t, eta, color="#7f8c8d", lw=1.2, alpha=0.85, label=r"Shaft $\eta_0=T V_a/(Q\omega)$")
+        if np.isfinite(etap_mean):
+            ax.axhline(
+                etap_mean,
+                color="#c0392b",
+                ls="--",
+                lw=1.3,
+                label=fr"Mean $\eta_p$ (post-startup): {etap_mean:.3f}",
+            )
+        ax.axhline(0.6, color="#1e8449", ls=":", lw=1.4, label=r"Target $\eta_p=0.6$")
+        ax.set_ylabel(r"Efficiency [-]")
+        last_txt = rf"Last $\eta_p={etap_last:.3f}$, $\eta_0={eta0_last:.3f}$"
+    else:
+        ax.plot(t, eta, color="#0b5cab", lw=1.6, label=eta_label)
+        if np.isfinite(eta_mean):
+            ax.axhline(eta_mean, color="#c0392b", ls="--", lw=1.25, label=fr"Mean: {eta_mean:.3f}")
+        ax.set_ylabel(eta_yl)
+        last_txt = rf"Last $\eta_0={eta_last:.3f}$"
+    ax.set_ylim(0.0, 1.05)
+    ax.legend(loc="lower right", framealpha=0.95, fontsize=8)
     ax.grid(True, alpha=0.35)
     ax.yaxis.set_minor_locator(AutoMinorLocator())
     title = fr"Propulsor performance vs time — $n={rpm:.0f}$ rpm, $|V_a|={va:.2f}$ m/s"
@@ -182,7 +230,7 @@ def plot_performance(
     ax.text(
         0.015,
         0.96,
-        rf"$\omega = 2\pi n = {omega:.2f}$ rad/s" + "\n" + rf"Last $\eta_0 = {eta_last:.3f}$",
+        rf"$\omega = 2\pi n = {omega:.2f}$ rad/s" + "\n" + last_txt,
         transform=ax.transAxes,
         va="top",
         ha="left",
@@ -196,15 +244,17 @@ def plot_performance(
     ax.plot(t, T, color="#e67e22", lw=1.5, label=r"Thrust $T$ (advance direction)")
     if np.isfinite(T_mean):
         ax.axhline(T_mean, color="#922b21", ls="--", lw=1.2, label=fr"Mean (post-startup): {T_mean:.4g}")
+    ax.axhline(100.0, color="#1e8449", ls=":", lw=1.3, label=r"Target $T=100$ N")
     yl = _ylim_from_ss(T, mask)
     if yl:
-        ax.set_ylim(*yl)
-    ax.set_ylabel(r"Thrust $T$  [N / $\rho$ if $\rho_\mathrm{inf}=1$]")
-    ax.legend(loc="best", framealpha=0.95)
+        # ensure target line visible if T is large
+        ax.set_ylim(min(yl[0], 0), max(yl[1], 120))
+    ax.set_ylabel(r"Thrust $T$  [N]  ($\rho_\mathrm{inf}$ applied)")
+    ax.legend(loc="best", framealpha=0.95, fontsize=8)
     ax.grid(True, alpha=0.35)
     ax.yaxis.set_minor_locator(AutoMinorLocator())
 
-    # --- Torque vs time (signed about rotation axis) ---
+    # --- Torque vs time ---
     ax = axes[2]
     ax.plot(t, Q, color="#6c3483", lw=1.5, label=r"Torque $Q$ (about rotation axis)")
     if np.isfinite(Q_mean):
@@ -218,9 +268,9 @@ def plot_performance(
     yl = _ylim_from_ss(Q, mask)
     if yl:
         ax.set_ylim(*yl)
-    ax.set_ylabel(r"Torque $Q$  [N·m / $\rho$ if $\rho_\mathrm{inf}=1$]")
+    ax.set_ylabel(r"Torque $Q$  [N·m]")
     ax.set_xlabel("Time $t$ [s]")
-    ax.legend(loc="best", framealpha=0.95)
+    ax.legend(loc="best", framealpha=0.95, fontsize=8)
     ax.grid(True, alpha=0.35)
     ax.xaxis.set_major_locator(MaxNLocator(nbins=10))
     ax.yaxis.set_minor_locator(AutoMinorLocator())
@@ -232,16 +282,17 @@ def plot_performance(
     fig.savefig(pdf, bbox_inches="tight")
     plt.close(fig)
 
-    # Also write a thrust+torque-only companion figure (time domain, for reports)
+    # Thrust+torque companion
     fig2, axes2 = plt.subplots(2, 1, figsize=(11, 6.5), sharex=True, gridspec_kw={"hspace": 0.12})
     ax = axes2[0]
     ax.plot(t, T, color="#e67e22", lw=1.6, label="Thrust $T$")
     if np.isfinite(T_mean):
         ax.axhline(T_mean, color="#922b21", ls="--", lw=1.2, label=f"Mean: {T_mean:.4g}")
+    ax.axhline(100.0, color="#1e8449", ls=":", lw=1.2, label="Target 100 N")
     yl = _ylim_from_ss(T, mask)
     if yl:
-        ax.set_ylim(*yl)
-    ax.set_ylabel(r"Thrust $T$")
+        ax.set_ylim(min(yl[0], 0), max(yl[1], 120))
+    ax.set_ylabel(r"Thrust $T$ [N]")
     ax.legend(loc="best")
     ax.grid(True, alpha=0.35)
     ax.set_title(fr"Thrust and torque vs time — $n={rpm:.0f}$ rpm")
@@ -260,7 +311,7 @@ def plot_performance(
     yl = _ylim_from_ss(Q, mask)
     if yl:
         ax.set_ylim(*yl)
-    ax.set_ylabel(r"Torque $Q$")
+    ax.set_ylabel(r"Torque $Q$ [N·m]")
     ax.set_xlabel("Time $t$ [s]")
     ax.legend(loc="best")
     ax.grid(True, alpha=0.35)
@@ -269,10 +320,15 @@ def plot_performance(
     fig2.savefig(out_dir / "propulsor_thrust_torque.pdf", bbox_inches="tight")
     plt.close(fig2)
 
+    # Headline eta: prefer Froude when requested / available
+    headline = etap_mean if (primary == "froude" and np.isfinite(etap_mean)) else eta_mean
+
     stats = {
-        "eta_mean": eta_mean,
+        "eta_mean": headline,
         "eta_med": eta_med,
         "eta_last": eta_last,
+        "eta0_mean": eta0_mean,
+        "etap_mean": etap_mean,
         "T_mean": T_mean,
         "Q_mean": Q_mean,
         "Q_abs_mean": Q_abs_mean,
@@ -292,6 +348,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--u-inf", type=float, nargs=3, default=[0.0, -5.0, 0.0])
     p.add_argument("--meta", type=Path, default=None, help="Optional pipeline_meta.json")
     p.add_argument("--title-suffix", type=str, default="")
+    p.add_argument("--rho", type=float, default=1.0, help="Density used for Froude CT [kg/m^3]")
+    p.add_argument("--diameter", type=float, default=0.0, help="Rotor diameter [m] for Froude CT")
+    p.add_argument(
+        "--primary-eta",
+        choices=("shaft", "froude"),
+        default="shaft",
+        help="Which efficiency is the headline mean (shaft η0 or Froude ηp)",
+    )
     return p.parse_args(argv)
 
 
@@ -300,6 +364,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     rpm = args.rpm
     axis = np.array(args.axis, dtype=float)
     u_inf = np.array(args.u_inf, dtype=float)
+    rho = float(args.rho)
+    diameter = float(args.diameter)
 
     if args.meta and args.meta.is_file():
         meta = json.loads(args.meta.read_text())
@@ -308,22 +374,46 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             axis = np.array(meta["axis"], dtype=float)
         if "u_inf" in meta:
             u_inf = np.array(meta["u_inf"], dtype=float)
+        if "D" in meta.get("domain", {}):
+            diameter = float(meta["domain"]["D"])
+        elif "D" in meta:
+            diameter = float(meta["D"])
+        # design_params style
+        if diameter <= 0 and "D" in meta:
+            diameter = float(meta["D"])
 
     if not args.forces.is_file():
         raise SystemExit(f"forces.dat not found: {args.forces}")
 
-    t, rev, T, Q, eta = load_forces(args.forces, axis, u_inf, rpm)
+    t, rev, T, Q, eta0 = load_forces(args.forces, axis, u_inf, rpm)
     if len(t) == 0:
         raise SystemExit(f"No force samples parsed from {args.forces}")
 
     va = float(np.linalg.norm(u_inf))
-    stats = plot_performance(t, rev, T, Q, eta, rpm, va, args.out_dir, args.title_suffix)
+    eta_p = None
+    if diameter > 0 and rho > 0:
+        eta_p = froude_efficiency(T, va, rho, diameter)
+
+    stats = plot_performance(
+        t,
+        rev,
+        T,
+        Q,
+        eta0,
+        rpm,
+        va,
+        args.out_dir,
+        args.title_suffix,
+        eta_p=eta_p,
+        primary=args.primary_eta,
+    )
     print("Wrote", stats["png"])
     print("Wrote", stats["pdf"])
     print("Wrote", Path(stats["csv"]).parent / "propulsor_thrust_torque.png")
     print(
-        f"eta_mean={stats['eta_mean']:.4f}  T_mean={stats['T_mean']:.6g}  "
-        f"Q_mean={stats['Q_mean']:.6g}  |Q|_mean={stats['Q_abs_mean']:.6g}"
+        f"eta_mean={stats['eta_mean']:.4f}  eta0_mean={stats.get('eta0_mean', float('nan')):.4f}  "
+        f"etap_mean={stats.get('etap_mean', float('nan')):.4f}  "
+        f"T_mean={stats['T_mean']:.6g}  Q_mean={stats['Q_mean']:.6g}  |Q|_mean={stats['Q_abs_mean']:.6g}"
     )
 
 

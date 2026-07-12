@@ -1,0 +1,29 @@
+{
+  "version": 3,
+  "D": 0.2,
+  "hub_ratio": 0.27999999999999997,
+  "Zr": 6,
+  "Zs": 9,
+  "pitch_ratio": 1.0,
+  "design_J": 0.75,
+  "tip_clearance_m": 0.003,
+  "duct_length_m": 0.21000000000000002,
+  "rpm": 3200.0,
+  "Va": 8.0,
+  "J": 0.7499999999999999,
+  "rho": 1000.0,
+  "target_thrust_N": 100.0,
+  "target_eta_p": 0.6,
+  "nprocs": 6,
+  "axis": [
+    0,
+    1,
+    0
+  ],
+  "u_inf": [
+    0,
+    -8.0,
+    0
+  ],
+  "notes": "v3: 6-proc MRF, 3200 rpm, Va=8 m/s, \u03c1=1000; target T\u2265100 N and Froude \u03b7_p\u22650.6."
+}
