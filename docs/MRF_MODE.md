@@ -19,7 +19,7 @@ Sliding mode uses `solidBody` mesh motion and non-conformal couples. It is more 
 4. **constant/MRFProperties** — origin, axis, rpm  
 5. **0/U** — rotor patch type `MRFnoSlip`  
 6. **static** `dynamicMeshDict` (no mesh mover)  
-7. **Allmesh / Allrun** — serial snappy by default for robustness  
+7. **Allmesh / Allrun** — mesh + solve on `NPROCS` ranks (default **4**); MRF uses parallel snappy + topoSet cellZone (no rotatingZone wall)  
 
 ## Config
 

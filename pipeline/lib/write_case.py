@@ -658,13 +658,7 @@ def main() -> None:
                     }}
                 }}
                 {stator_surf}
-                rotatingZone
-                {{
-                    level       ({rzone} {rzone});
-                    cellZone    rotatingZone;
-                    faceZone    rotatingZone;
-                    mode        inside;
-                }}
+                {rotzone_surf}
             }}
 
             resolveFeatureAngle 30;
@@ -1113,7 +1107,8 @@ def main() -> None:
         divSchemes
         {
             default         none;
-            div(phi,U)      Gauss limitedLinearV 1;
+            // Stable on coarse/non-ortho MRF demo meshes
+            div(phi,U)      Gauss upwind;
             div(phi,k)      Gauss upwind;
             div(phi,epsilon) Gauss upwind;
             div((nuEff*dev2(T(grad(U))))) Gauss linear;
@@ -1195,17 +1190,25 @@ def main() -> None:
         PIMPLE
         {
             nOuterCorrectors 2;
-            nCorrectors      1;
-            nNonOrthogonalCorrectors 1;
-            correctPhi       yes;
-            correctMeshPhi   yes;
+            nCorrectors      2;
+            nNonOrthogonalCorrectors 2;
+            // Static MRF mesh — skip mesh-motion phi corrections
+            correctPhi       no;
+            correctMeshPhi   no;
+            momentumPredictor yes;
         }
 
         relaxationFactors
         {
+            fields
+            {
+                p               0.3;
+            }
             equations
             {
-                ".*"            1;
+                U               0.7;
+                k               0.7;
+                epsilon         0.7;
             }
         }
         """,
@@ -1236,26 +1239,35 @@ runApplication -a topoSet || true
 runApplication $(getApplication)
 """
         else:
+            # Mesh + solve on NPROCS ranks (default 4)
             allmesh = """
 #!/bin/sh
 cd "${0%/*}" || exit 1
 . "$WM_PROJECT_DIR/bin/tools/RunFunctions"
 runApplication blockMesh
 runApplication surfaceFeatures
-runApplication snappyHexMesh -overwrite
-runApplication topoSet
-runApplication renumberMesh -noFields -overwrite
 runApplication decomposePar -force -noFields
+runParallel snappyHexMesh -overwrite
+# Build MRF cell zone on each processor mesh (no faceZone walls)
+runParallel topoSet
+runParallel renumberMesh -noFields -overwrite
+# OpenFOAM 11+: reconstructPar rebuilds the mesh when needed (no reconstructParMesh)
+runApplication reconstructPar -constant -withZero || true
+# Ensure MRF zone on serial mesh after reconstruct
+if [ -d constant/polyMesh ]; then
+    runApplication -a topoSet || true
+fi
 """
             allrun = """
 #!/bin/sh
 cd "${0%/*}" || exit 1
 . "$WM_PROJECT_DIR/bin/tools/RunFunctions"
-if [ ! -d constant/polyMesh ]; then
+if [ ! -d processor0/constant/polyMesh ] && [ ! -d constant/polyMesh ]; then
     ./Allmesh
 fi
-runApplication -a topoSet || true
-if [ ! -d processor0 ]; then
+# If only serial mesh exists, decompose it
+if [ -d constant/polyMesh ] && [ ! -d processor0 ]; then
+    runApplication -a topoSet || true
     runApplication decomposePar -force -noFields
 fi
 runApplication -a decomposePar -fields -copyZero

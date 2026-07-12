@@ -1,18 +1,23 @@
 {
   "D": 0.2,
-  "hub_ratio": 0.3,
+  "hub_ratio": 0.32,
   "Zr": 5,
   "Zs": 7,
-  "pitch_ratio": 1.05,
-  "tip_clearance_m": 0.004,
-  "duct_length_m": 0.16,
-  "rpm": 900,
-  "Va": 1.5,
-  "J": 0.5,
+  "pitch_ratio": 1.25,
+  "tip_clearance_m": 0.005,
+  "duct_length_m": 0.18,
+  "rpm": 1000.0,
+  "Va": 2.0,
+  "J": 0.5999999999999999,
   "axis": [
     0,
     1,
     0
   ],
-  "notes": "Demo pumpjet: simplified blades; not a production naval design."
+  "u_inf": [
+    0,
+    -2.0,
+    0
+  ],
+  "notes": "v2: P/D=1.25, -y jet sense, 1000 rpm / Va=2 m/s; 4-proc MRF demo."
 }

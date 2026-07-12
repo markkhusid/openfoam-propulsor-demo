@@ -74,10 +74,19 @@ def load_forces(
 
 
 def _ss_mask(t: np.ndarray) -> np.ndarray:
+    """Post-startup window for mean stats (last ~75% of the run).
+
+    Uses a relative threshold so short demos (endTime << 0.02 s) still get
+    valid mean lines; longer runs skip the initial transient fraction.
+    """
     if len(t) == 0:
         return np.array([], dtype=bool)
     t_end = float(t[-1])
-    return t >= max(0.02, 0.25 * t_end) if t_end > 0 else np.ones_like(t, dtype=bool)
+    if t_end <= 0:
+        return np.ones_like(t, dtype=bool)
+    # Drop early transient: max(25% of run, but never more than 75% of run)
+    t0 = min(0.25 * t_end, max(0.0, t_end - 1e-12))
+    return t >= t0
 
 
 def _ylim_from_ss(y: np.ndarray, mask: np.ndarray, pad_frac: float = 0.15, floor0: bool = False):

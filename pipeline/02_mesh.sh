@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate mesh (MRF: serial snappy + topoSet; sliding: parallel snappy + NCC).
+# Generate mesh (MRF: NPROCS parallel snappy + topoSet; sliding: parallel snappy + NCC).
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=/dev/null

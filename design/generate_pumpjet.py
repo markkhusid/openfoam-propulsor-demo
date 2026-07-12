@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Generate a simplified, mesh-friendly pumpjet (demo).
+Generate an improved demo pumpjet (rotor + duct + post-swirl stator).
 
-Design choices (literature-informed, simplified for snappyHexMesh):
-  - Rotor: hub + Z blades, P/D ~ 1.05, hub ratio 0.3
-  - Duct: thin annular wall, L/D ~ 0.8, mild contraction
-  - Stator: post-swirl vanes that stop short of the hub (clearance gap)
-  - Also emit rotating-zone / domain helper cylinders as STL for robust NCC
+Design goals vs previous version:
+  - Stronger geometric pitch so MRF produces a clear jet (not near-zero |U| on cuts)
+  - Pitch sense matched to freestream U = (0, -Va, 0): accelerate fluid in -y
+  - Cleaner duct; stator vanes with hub clearance
+  - Slightly larger chord / thickness for coarse-mesh capture
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ def write_binary_stl(path: Path, tris: Sequence[Tri], name: str = "part") -> Non
 
 
 def add_tri(tris: List[Tri], a, b, c) -> None:
-    a, b, c = np.asarray(a, float), np.asarray(b, float), np.asarray(c, float)
+    a, b, c = map(lambda x: np.asarray(x, float), (a, b, c))
     if np.linalg.norm(np.cross(b - a, c - a)) < 1e-16:
         return
     tris.append((a, b, c))
@@ -67,7 +67,7 @@ def cylinder_solid(tris, y0, y1, r, n_theta=48):
         add_tri(tris, c1, r1[i], r1[j])
 
 
-def annular_duct(tris, y0, y1, r_in0, r_out0, r_in1, r_out1, n_theta=64):
+def annular_duct(tris, y0, y1, r_in0, r_out0, r_in1, r_out1, n_theta=72):
     th = np.linspace(0, 2 * np.pi, n_theta, endpoint=False)
 
     def ring(y, r):
@@ -77,19 +77,13 @@ def annular_duct(tris, y0, y1, r_in0, r_out0, r_in1, r_out1, n_theta=64):
     ii1, oo1 = ring(y1, r_in1), ring(y1, r_out1)
     for i in range(n_theta):
         j = (i + 1) % n_theta
-        add_quad(tris, oo0[i], oo0[j], oo1[j], oo1[i])  # outer
-        add_quad(tris, ii0[j], ii0[i], ii1[i], ii1[j])  # inner
-        add_quad(tris, ii0[i], ii0[j], oo0[j], oo0[i])  # inlet annulus
-        add_quad(tris, ii1[j], ii1[i], oo1[i], oo1[j])  # outlet annulus
+        add_quad(tris, oo0[i], oo0[j], oo1[j], oo1[i])
+        add_quad(tris, ii0[j], ii0[i], ii1[i], ii1[j])
+        add_quad(tris, ii0[i], ii0[j], oo0[j], oo0[i])
+        add_quad(tris, ii1[j], ii1[i], oo1[i], oo1[j])
 
 
-def cylinder_surface_closed(tris, y0, y1, r, n_theta=48, n_y=8):
-    """Closed thin shell approximating a cylindrical interface surface (solid tube)."""
-    t = 0.0015
-    annular_duct(tris, y0, y1, r - t, r + t, r - t, r + t, n_theta=n_theta)
-
-
-def airfoil(c, t_c=0.12, n=18):
+def airfoil(c, t_c=0.14, n=20):
     xs = np.linspace(0, 1, n)
     yt = 5 * t_c * (
         0.2969 * np.sqrt(np.clip(xs, 1e-12, 1))
@@ -103,9 +97,25 @@ def airfoil(c, t_c=0.12, n=18):
     return np.vstack([upper[:-1], lower[:-1]])
 
 
-def blade(tris, y_le, r_hub, r_tip, ch_h, ch_t, pitch_h, pitch_t, n_span=7, n_sec=14, t_c=0.12):
+def blade(
+    tris,
+    y_le,
+    r_hub,
+    r_tip,
+    ch_h,
+    ch_t,
+    pitch_h,
+    pitch_t,
+    n_span=9,
+    n_sec=16,
+    t_c=0.14,
+    # For freestream in -y: positive geometric pitch that drives jet in -y
+    # uses chord direction (dy, dz) with dy < 0 along chord for suction side loading
+    invert_chord_axial: bool = False,
+):
     spans = np.linspace(0, 1, n_span)
     profs = []
+    ax_sign = -1.0 if invert_chord_axial else 1.0
     for s in spans:
         r = r_hub + s * (r_tip - r_hub)
         ch = ch_h + s * (ch_t - ch_h)
@@ -114,8 +124,10 @@ def blade(tris, y_le, r_hub, r_tip, ch_h, ch_t, pitch_h, pitch_t, n_span=7, n_se
         ca, sa = math.cos(pitch), math.sin(pitch)
         pts = []
         for xc, tc in sec:
-            dy = (xc - 0.3 * ch) * ca
-            dz = (xc - 0.3 * ch) * sa
+            # mid-chord reference at 0.3c from LE
+            s_ch = (xc - 0.3 * ch)
+            dy = ax_sign * s_ch * ca  # axial component along +y or -y
+            dz = s_ch * sa  # tangential
             pts.append(np.array([r + tc, y_le + dy, dz]))
         profs.append(np.asarray(pts))
     m = len(profs[0])
@@ -143,76 +155,75 @@ def rot_tris(tris, ang):
 def generate(out_dir: Path) -> dict:
     D = 0.20
     R = 0.5 * D
-    hub_r = 0.03
-    tip_clear = 0.004  # 4% R — friendlier for coarse snappy
+    hub_r = 0.032  # slightly larger hub for solid capture
+    tip_clear = 0.005
     r_tip = R - tip_clear
     Zr, Zs = 5, 7
-    P_over_D = 1.05
+    # Stronger pitch than before (was 1.05) for clearer jet at J~0.5
+    P_over_D = 1.25
 
     def pitch_at(r):
         return math.atan(P_over_D * D / (2 * math.pi * max(r, 1e-6)))
 
-    y_rotor = 0.0
-    # Rotor
+    # Rotor: freestream U=(0,-Va,0) → want jet further -y → chord axial component -y
     rotor: List[Tri] = []
-    cylinder_solid(rotor, -0.025, 0.04, hub_r, 40)
+    cylinder_solid(rotor, -0.028, 0.045, hub_r, 48)
     for i in range(Zr):
         one: List[Tri] = []
         blade(
             one,
-            y_le=-0.005,
-            r_hub=hub_r * 1.03,
+            y_le=0.0,
+            r_hub=hub_r * 1.04,
             r_tip=r_tip,
-            ch_h=0.042,
-            ch_t=0.028,
-            pitch_h=pitch_at(hub_r * 1.15),
+            ch_h=0.055,
+            ch_t=0.038,
+            pitch_h=pitch_at(hub_r * 1.2),
             pitch_t=pitch_at(0.7 * R),
-            n_span=6,
-            n_sec=12,
-            t_c=0.13,
+            n_span=10,
+            n_sec=18,
+            t_c=0.15,
+            invert_chord_axial=True,  # dy negative along chord → -y jet
         )
         rotor.extend(rot_tris(one, 2 * math.pi * i / Zr))
 
-    # Duct only (no fused hub) — open flow path
+    # Duct: mild contraction, ample tip clearance
     duct: List[Tri] = []
-    y_in, y_out = -0.05, 0.11
+    y_in, y_out = -0.06, 0.12
     annular_duct(
         duct,
         y_in,
         y_out,
-        r_in0=R + 0.001,
-        r_out0=R + 0.009,
-        r_in1=0.92 * R,
-        r_out1=0.92 * R + 0.009,
-        n_theta=56,
+        r_in0=R + 0.002,
+        r_out0=R + 0.012,
+        r_in1=0.90 * R,
+        r_out1=0.90 * R + 0.012,
+        n_theta=80,
     )
-    # Post-swirl stator vanes with hub clearance (do not touch hub)
+    # Post-swirl stator (opposite pitch sense), hub gap
     for i in range(Zs):
         one = []
         blade(
             one,
-            y_le=0.03,
-            r_hub=hub_r + 0.012,  # gap to hub
-            r_tip=0.90 * R,
-            ch_h=0.024,
-            ch_t=0.018,
-            pitch_h=-0.40,
-            pitch_t=-0.28,
-            n_span=5,
-            n_sec=10,
-            t_c=0.11,
+            y_le=0.04,
+            r_hub=hub_r + 0.015,
+            r_tip=0.88 * R,
+            ch_h=0.032,
+            ch_t=0.024,
+            pitch_h=-0.55,
+            pitch_t=-0.40,
+            n_span=8,
+            n_sec=14,
+            t_c=0.13,
+            invert_chord_axial=False,
         )
         duct.extend(rot_tris(one, 2 * math.pi * i / Zs + math.pi / Zs))
-
-    # Helper surfaces for robust snappy zones (optional use)
-    rotzone: List[Tri] = []
-    cylinder_surface_closed(rotzone, -0.04, 0.05, r_tip + 0.5 * tip_clear, n_theta=48)
 
     out_dir = Path(out_dir)
     write_binary_stl(out_dir / "rotor.stl", rotor, "rotor")
     write_binary_stl(out_dir / "duct_stator.stl", duct, "duct_stator")
-    write_binary_stl(out_dir / "rotatingZone.stl", rotzone, "rotatingZone")
 
+    rpm = 1000.0
+    Va = 2.0
     meta = {
         "D": D,
         "hub_ratio": 2 * hub_r / D,
@@ -221,11 +232,12 @@ def generate(out_dir: Path) -> dict:
         "pitch_ratio": P_over_D,
         "tip_clearance_m": tip_clear,
         "duct_length_m": y_out - y_in,
-        "rpm": 900,
-        "Va": 1.5,
-        "J": 1.5 / ((900 / 60.0) * D),
+        "rpm": rpm,
+        "Va": Va,
+        "J": Va / ((rpm / 60.0) * D),
         "axis": [0, 1, 0],
-        "notes": "Demo pumpjet: simplified blades; not a production naval design.",
+        "u_inf": [0, -Va, 0],
+        "notes": "v2: P/D=1.25, -y jet sense, 1000 rpm / Va=2 m/s; 4-proc MRF demo.",
     }
     (out_dir / "design_params.json").write_text(json.dumps(meta, indent=2))
     print(json.dumps(meta, indent=2))

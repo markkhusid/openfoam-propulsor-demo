@@ -280,7 +280,7 @@ Logs to inspect: `log.blockMesh`, `log.snappyHexMesh`, `log.foamRun`, `log.creat
 |--------|---------|
 | `pipeline/00_check_deps.sh` | Host / Docker prerequisites |
 | `pipeline/01_prepare_case.sh` | STL → full OF case (MRF or sliding) |
-| `pipeline/02_mesh.sh` | Mesh (+ topoSet for MRF / NCC for sliding) |
+| `pipeline/02_mesh.sh` | Mesh on NPROCS ranks (+ topoSet for MRF / NCC for sliding) |
 | `pipeline/03_run.sh` | Serial or parallel solve + disk watchdog |
 | `pipeline/04_movie.sh` | ParaView or matplotlib frames → MP4 |
 | `pipeline/05_efficiency.sh` | η₀, thrust, torque vs time + CSV |
