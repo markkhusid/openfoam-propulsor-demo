@@ -1,0 +1,28 @@
+#!/bin/sh
+cd ${0%/*} || exit 1    # Run from this directory
+
+# Source tutorial run functions
+. $WM_PROJECT_DIR/bin/tools/RunFunctions
+
+# Copy propeller surfaces from the image resources if missing
+if [ ! -f constant/geometry/propeller.obj.gz ]; then
+    cp $FOAM_TUTORIALS/resources/geometry/propeller*.obj.gz constant/geometry/
+fi
+
+# Mesh in parallel
+runApplication blockMesh
+runApplication surfaceFeatures
+runApplication decomposePar -noFields
+runParallel snappyHexMesh -overwrite
+
+# Create the sliding patches
+runParallel createBaffles -overwrite
+runParallel splitBaffles -overwrite
+
+# Renumber
+runParallel renumberMesh -noFields -overwrite
+
+# Create non-conformal couples (sliding interface for rotating zone)
+runParallel createNonConformalCouples -overwrite nonCouple1 nonCouple2
+
+#------------------------------------------------------------------------------

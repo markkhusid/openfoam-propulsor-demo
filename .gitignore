@@ -1,0 +1,21 @@
+# OpenFOAM runtime
+processor*/
+postProcessing/surfaces/
+[0-9]*/
+!0/
+!0/**
+dynamicCode/
+*.OpenFOAM
+*.foam
+
+# Logs / OS
+log.*
+*.log
+.DS_Store
+__pycache__/
+*.pyc
+.venv/
+
+# Large intermediate movie frames
+movies/frames/
+results/movies/frames/

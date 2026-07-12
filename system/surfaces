@@ -1,0 +1,68 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  11
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+
+// Dense surface samples for a ~10 s MP4 without heavy volume I/O.
+// 0.08 s / 0.0005 s => ~160 frames @ 16 fps ≈ 10 s playback.
+
+surfaces
+{
+    type            surfaces;
+    libs            ("libsampling.so");
+
+    writeControl    adjustableRunTime;
+    writeInterval   0.0005;
+
+    surfaceFormat   vtk;
+    writeFormat     binary;
+    fields          (p U Q);
+
+    interpolationScheme cellPoint;
+
+    surfaces
+    (
+        // Mid-plane slice — primary movie view (velocity / pressure)
+        zNormal
+        {
+            type            cutPlane;
+            planeType       pointAndNormal;
+            point           (0 0 0);
+            normal          (0 0 1);
+            interpolate     true;
+        }
+
+        // Streamwise slice (inflow is −y)
+        yNormal
+        {
+            type            cutPlane;
+            planeType       pointAndNormal;
+            point           (0 0 0);
+            normal          (0 1 0);
+            interpolate     true;
+        }
+
+        // Blade surface
+        propeller
+        {
+            type            patch;
+            patches         ("propeller.*");
+            interpolate     true;
+        }
+
+        // Vortical structures (may be sparse on coarse mesh; kept optional)
+        isoQ
+        {
+            type            isoSurface;
+            isoField        Q;
+            isoValue        500;
+            interpolate     true;
+        }
+    );
+}
+
+
+// ************************************************************************* //
