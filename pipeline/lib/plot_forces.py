@@ -195,29 +195,20 @@ def plot_performance(
     ax.grid(True, alpha=0.35)
     ax.yaxis.set_minor_locator(AutoMinorLocator())
 
-    # --- Torque vs time ---
+    # --- Torque vs time (signed about rotation axis) ---
     ax = axes[2]
     ax.plot(t, Q, color="#6c3483", lw=1.5, label=r"Torque $Q$ (about rotation axis)")
-    ax.plot(t, np.abs(Q), color="#af7ac5", lw=1.0, ls="--", alpha=0.85, label=r"$|Q|$")
     if np.isfinite(Q_mean):
-        ax.axhline(Q_mean, color="#4a235a", ls="--", lw=1.1, label=fr"Mean $Q$ (post-startup): {Q_mean:.4g}")
-    if np.isfinite(Q_abs_mean):
         ax.axhline(
-            Q_abs_mean,
-            color="#7d3c98",
-            ls=":",
-            lw=1.15,
-            label=fr"Mean $|Q|$ (post-startup): {Q_abs_mean:.4g}",
+            Q_mean,
+            color="#4a235a",
+            ls="--",
+            lw=1.2,
+            label=fr"Mean $Q$ (post-startup): {Q_mean:.4g}  ($|Q|={Q_abs_mean:.4g}$)",
         )
-    # Y-limits from post-startup signed torque (startup spikes excluded)
     yl = _ylim_from_ss(Q, mask)
     if yl:
-        if mask.any() and Q[mask].max() < 0:
-            ax.set_ylim(yl[0], min(0.0, yl[1]))
-        elif mask.any() and Q[mask].min() > 0:
-            ax.set_ylim(max(0.0, yl[0]), yl[1])
-        else:
-            ax.set_ylim(*yl)
+        ax.set_ylim(*yl)
     ax.set_ylabel(r"Torque $Q$  [N·m / $\rho$ if $\rho_\mathrm{inf}=1$]")
     ax.set_xlabel("Time $t$ [s]")
     ax.legend(loc="best", framealpha=0.95)
@@ -248,10 +239,15 @@ def plot_performance(
     add_rev_axis(ax)
 
     ax = axes2[1]
-    ax.plot(t, Q, color="#6c3483", lw=1.6, label="Torque $Q$")
-    ax.plot(t, np.abs(Q), color="#af7ac5", lw=1.0, ls="--", label="$|Q|$")
+    ax.plot(t, Q, color="#6c3483", lw=1.6, label="Torque $Q$ (rotation axis)")
     if np.isfinite(Q_mean):
-        ax.axhline(Q_mean, color="#4a235a", ls="--", lw=1.2, label=f"Mean $Q$: {Q_mean:.4g}")
+        ax.axhline(
+            Q_mean,
+            color="#4a235a",
+            ls="--",
+            lw=1.2,
+            label=f"Mean $Q$: {Q_mean:.4g}  ($|Q|={Q_abs_mean:.4g}$)",
+        )
     yl = _ylim_from_ss(Q, mask)
     if yl:
         ax.set_ylim(*yl)

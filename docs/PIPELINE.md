@@ -254,7 +254,8 @@ Logs to inspect: `log.blockMesh`, `log.snappyHexMesh`, `log.foamRun`, `log.creat
 | `pipeline/02_mesh.sh` | Parallel mesh + sliding interface |
 | `pipeline/03_run.sh` | Parallel transient solve + disk watchdog |
 | `pipeline/04_movie.sh` | pvpython frames → ffmpeg MP4 |
-| `pipeline/05_efficiency.sh` | \(\eta_0\) plot + CSV |
+| `pipeline/05_efficiency.sh` | \(\eta_0\), thrust, torque vs time + CSV |
+| `pipeline/lib/plot_forces.py` | Shared plotting library |
 | `pipeline/run_all.sh` | End-to-end driver |
 | `pipeline/lib/write_case.py` | Case generator |
 | `pipeline/lib/stl_utils.py` | STL bbox / scale / watertight check |
