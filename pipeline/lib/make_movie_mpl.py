@@ -375,7 +375,9 @@ def main():
     h = int(os.environ.get("MOVIE_HEIGHT", 720))
     dpi = 100
     fig_w, fig_h = w / dpi, h / dpi
-    show_quiver = os.environ.get("MOVIE_QUIVER", "1") not in ("0", "false", "no")
+    # Quiver arrows off by default — they clutter the through-flow view.
+    # Set MOVIE_QUIVER=1 to re-enable.
+    show_quiver = os.environ.get("MOVIE_QUIVER", "0") in ("1", "true", "yes")
 
     for fi, (tval, tdir) in enumerate(times):
         fpath = tdir / f"{sample_name}.vtk"
