@@ -9,6 +9,25 @@ The automation lives under [`pipeline/`](../pipeline/).
 
 ---
 
+## 0. Rotation mode (MRF vs sliding)
+
+| `ROTATION_MODE` | Meaning | Use when |
+|-----------------|---------|----------|
+| **`mrf`** (default) | Static mesh + Multiple Reference Frame | Pumpjets, ducted rotors, coarse meshes, reliable demos |
+| **`sliding`** | Moving mesh + non-conformal couples | True rotor motion / finer meshes on stronger hardware |
+
+Full MRF guide: [`docs/MRF_MODE.md`](MRF_MODE.md).
+
+Pumpjet example config: [`pipeline/config.pumpjet.example.env`](../pipeline/config.pumpjet.example.env).
+
+```bash
+# Recommended pumpjet path
+python3 design/generate_pumpjet.py   # optional parametric STLs
+cp pipeline/config.pumpjet.example.env pipeline/config.env
+# edit REPO_ROOT / paths
+./pipeline/run_all.sh pipeline/config.env
+```
+
 ## 1. What you need
 
 ### Geometry (CAD)
@@ -97,13 +116,14 @@ Copy [`pipeline/config.env.example`](../pipeline/config.env.example) → `pipeli
 
 | Variable | Meaning | Example |
 |----------|---------|---------|
+| `ROTATION_MODE` | `mrf` or `sliding` | `mrf` |
 | `ROTOR_STL` | Rotating watertight STL | `/data/pumpjet_rotor.stl` |
-| `STATOR_STLS` | Space-separated fixed STLs | `/data/duct.stl /data/stator.stl` |
+| `STATOR_STLS` | Fixed STLs (quoted if multiple) | `"/data/duct.stl"` |
 | `STL_SCALE` | Scale factor (mm→m: `0.001`) | `1.0` |
-| `RPM` | Rotation rate | `1500` |
-| `ROT_AXIS` | Shaft axis | `1 0 0` or `0 1 0` |
-| `ROT_ORIGIN` | Point on shaft | `0 0 0` (or leave 0 to auto-centre) |
-| `U_INF` | Freestream velocity | `5 0 0` (aligned with axis) |
+| `RPM` | Rotation rate | `900` |
+| `ROT_AXIS` | Shaft axis (quoted) | `"0 1 0"` |
+| `ROT_ORIGIN` | Point on shaft (quoted) | `"0 0 0"` |
+| `U_INF` | Freestream velocity (quoted) | `"0 -1.5 0"` |
 | `NU` | Kinematic viscosity | `1e-6` (water) |
 | `RHO_INF` | Density for force reporting | `1025` for seawater dimensional forces |
 
@@ -167,21 +187,30 @@ Volume field dumps stay sparse (`VOLUME_WRITE_PER_REV`) so disk is dominated by 
 
 ## 4. Physics model (what the case does)
 
+### MRF (`ROTATION_MODE=mrf`, default)
+
 ```
-blockMesh (box domain)
-    → surfaceFeatures (rotor / stator edges)
-    → snappyHexMesh (snap to STL + rotatingZone cylinder)
-    → createBaffles / splitBaffles (sliding interface)
-    → createNonConformalCouples (OF11 NCC, AMI-like)
-    → foamRun / incompressibleFluid + solidBody rotation
+blockMesh → surfaceFeatures → snappyHexMesh (rotor/stator walls only)
+    → topoSet (cylinder → cellZone rotatingZone)
+    → foamRun / incompressibleFluid + constant/MRFProperties
 ```
 
-- **Turbulence:** RAS k-ε (change in `constant/momentumTransport` if desired).  
-- **Motion:** `solidBody` rotation of `rotatingZone` cellZone at `RPM` about `ROT_AXIS`.  
-- **Forces:** function object on `rotor.*` patches → `forces.dat`.  
+- Rotor BC: `MRFnoSlip`  
+- Mesh is **static**; rotation is a source term in the MRF zone  
+
+### Sliding (`ROTATION_MODE=sliding`)
+
+```
+blockMesh → surfaceFeatures → snappyHexMesh (+ faceZone)
+    → createBaffles / splitBaffles → createNonConformalCouples
+    → foamRun + solidBody mesh motion
+```
+
+- **Turbulence:** RAS k-ε (edit `constant/momentumTransport` if desired).  
+- **Forces:** on `rotor` / `rotor.*` → `forces.dat`.  
 - **Movie samples:** cut planes + rotor surface (+ optional Q iso).
 
-This is an **open-water style** domain (box + freestream), not a fully appended submarine. Hull interaction can be added later as extra stator STLs / larger domain.
+This is an **open-water style** domain (box + freestream), not a fully appended submarine.
 
 ---
 

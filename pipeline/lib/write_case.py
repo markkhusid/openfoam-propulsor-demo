@@ -2,9 +2,11 @@
 """
 Generate / update an OpenFOAM 11 rotating-body case from pipeline config + STLs.
 
-Creates dictionaries suitable for:
-  blockMesh → surfaceFeatures → snappyHexMesh → createBaffles →
-  createNonConformalCouples → foamRun (incompressibleFluid)
+Creates OpenFOAM 11 incompressibleFluid cases.
+
+ROTATION_MODE:
+  mrf     — static mesh + MRF (default; recommended for pumpjets)
+  sliding — solidBody motion + non-conformal couples
 """
 from __future__ import annotations
 
@@ -76,6 +78,13 @@ def main() -> None:
     u_inf = env_vec("U_INF", "0 -5 0")
     nu = os.environ.get("NU", "1e-6")
     rho_inf = os.environ.get("RHO_INF", "1")
+
+    rotation_mode = os.environ.get("ROTATION_MODE", "mrf").strip().lower()
+    if rotation_mode not in ("mrf", "sliding"):
+        raise SystemExit(
+            f"ROTATION_MODE must be 'mrf' or 'sliding', got {rotation_mode!r}"
+        )
+    print(f"Rotation mode: {rotation_mode}")
 
     n_rev = env_float("N_REVOLUTIONS", 2.0)
     max_co = env_float("MAX_CO", 2.0)
@@ -168,6 +177,40 @@ def main() -> None:
     surf_write = end_time / float(n_frames)
 
     # --- field templates ---
+
+    if rotation_mode == "mrf":
+        rotor_bc = """
+            rotor
+            {
+                type            MRFnoSlip;
+                value           uniform (0 0 0);
+            }
+
+            "stator.*"
+            {
+                type            noSlip;
+            }
+        """
+    else:
+        rotor_bc = """
+            "rotor.*"
+            {
+                type            movingWallVelocity;
+                value           uniform (0 0 0);
+            }
+
+            "stator.*"
+            {
+                type            noSlip;
+            }
+
+            nonCouple
+            {
+                type            movingWallSlipVelocity;
+                value           uniform (0 0 0);
+            }
+        """
+
     write(
         case / "0" / "U",
         f"""
@@ -212,22 +255,7 @@ def main() -> None:
                 type            noSlip;
             }}
 
-            "rotor.*"
-            {{
-                type            movingWallVelocity;
-                value           uniform (0 0 0);
-            }}
-
-            "stator.*"
-            {{
-                type            noSlip;
-            }}
-
-            nonCouple
-            {{
-                type            movingWallSlipVelocity;
-                value           uniform (0 0 0);
-            }}
+{rotor_bc}
         }}
 
         // ************************************************************************* //
@@ -516,40 +544,58 @@ def main() -> None:
         """
 
     rc = dom["rot_cylinder"]
-    # Prefer a designed rotatingZone.stl (more robust faceZone) when provided
+    p1, p2, rr = rc["point1"], rc["point2"], rc["radius"]
     rotzone_stl = geom_dir / "rotatingZone.stl"
-    if not rotzone_stl.is_file():
-        # also accept repo design folder copy named rotatingZone.stl via env
-        cand = os.environ.get("ROTZONE_STL", "").strip()
-        if cand and Path(cand).is_file():
-            import shutil as _shutil
+    cand = os.environ.get("ROTZONE_STL", "").strip()
+    if cand and Path(cand).is_file():
+        shutil.copy2(cand, rotzone_stl)
 
-            _shutil.copy2(cand, rotzone_stl)
-    if rotzone_stl.is_file():
-        rotzone_geom = f"""
+    # MRF: searchableCylinder only for volume refinement; cellZone via topoSet.
+    # Sliding: surface + faceZone for NCC sliding interface.
+    if rotation_mode == "sliding":
+        if rotzone_stl.is_file():
+            rotzone_geom = f"""
             rotatingZone
             {{
                 type        triSurfaceMesh;
                 file        "rotatingZone.stl";
             }}
-        """
-        rotzone_feat = f"""
+            """
+            rotzone_feat = f"""
                 {{
                     file "rotatingZone.eMesh";
                     level {max(1, rzone - 1)};
                 }}
+            """
+            surf_feat_extra = '"rotatingZone.stl"'
+        else:
+            rotzone_geom = f"""
+            rotatingZone
+            {{
+                type        searchableCylinder;
+                point1      {foam_vector(p1)};
+                point2      {foam_vector(p2)};
+                radius      {rr};
+            }}
+            """
+            rotzone_feat = ""
+            surf_feat_extra = ""
+        rotzone_surf = f"""
+{rotzone_surf}
         """
     else:
         rotzone_geom = f"""
             rotatingZone
             {{
                 type        searchableCylinder;
-                point1      {foam_vector(rc['point1'])};
-                point2      {foam_vector(rc['point2'])};
-                radius      {rc['radius']};
+                point1      {foam_vector(p1)};
+                point2      {foam_vector(p2)};
+                radius      {rr};
             }}
-        """
+            """
         rotzone_feat = ""
+        rotzone_surf = ""  # critical: no wall patch from zone surface
+        surf_feat_extra = ""
 
     write(
         case / "system" / "snappyHexMeshDict",
@@ -687,7 +733,7 @@ def main() -> None:
         """,
     )
 
-    rotzone_feat_name = '"rotatingZone.stl"' if rotzone_stl.is_file() else ""
+    pass  # surf_feat_extra set above
     write(
         case / "system" / "surfaceFeaturesDict",
         f"""
@@ -702,7 +748,7 @@ def main() -> None:
         (
             "rotor.stl"
             {chr(10).join(f'            "{n}.stl"' for n in stator_names)}
-            {rotzone_feat_name}
+            {surf_feat_extra}
         );
 
         includedAngle   150;
@@ -710,67 +756,135 @@ def main() -> None:
         """,
     )
 
-    # createBaffles for faceZone rotatingZone → nonCouple1/2 patches (OF11)
+
+    # topoSet cylinder → cellZone rotatingZone (MRF and backup for sliding)
     write(
-        case / "system" / "createBafflesDict",
-        """
-        FoamFile
-        {
-            format      ascii;
-            class       dictionary;
-            object      createBafflesDict;
-        }
-
-        internalFacesOnly true;
-
-        baffles
-        {
-            nonCouple
-            {
-                type        faceZone;
-                zoneName    rotatingZone;
-
-                patches
-                {
-                    owner
-                    {
-                        name        nonCouple1;
-                        type        patch;
-                    }
-                    neighbour
-                    {
-                        name        nonCouple2;
-                        type        patch;
-                    }
-                }
-            }
-        }
-        """,
-    )
-
-    write(
-        case / "constant" / "dynamicMeshDict",
+        case / "system" / "topoSetDict",
         f"""
         FoamFile
         {{
             format      ascii;
             class       dictionary;
-            object      dynamicMeshDict;
+            object      topoSetDict;
         }}
 
-        mover
-        {{
-            type            motionSolver;
-            libs            ("libfvMeshMovers.so" "libfvMotionSolvers.so");
-            motionSolver    solidBody;
-            cellZone        rotatingZone;
-            solidBodyMotionFunction  rotatingMotion;
-            origin      {foam_vector(dom['origin'])};
-            axis        {foam_vector(dom['axis'])};
-            rpm         {rpm};
-        }}
+        actions
+        (
+            {{
+                name    rotatingZone;
+                type    cellSet;
+                action  new;
+                source  cylinderToCell;
+                p1      {foam_vector(p1)};
+                p2      {foam_vector(p2)};
+                radius  {rr};
+            }}
+            {{
+                name    rotatingZone;
+                type    cellZoneSet;
+                action  new;
+                source  setToCellZone;
+                set     rotatingZone;
+            }}
+        );
         """,
     )
+
+    if rotation_mode == "sliding":
+        write(
+            case / "system" / "createBafflesDict",
+            """
+            FoamFile
+            {
+                format      ascii;
+                class       dictionary;
+                object      createBafflesDict;
+            }
+
+            internalFacesOnly true;
+
+            baffles
+            {
+                nonCouple
+                {
+                    type        faceZone;
+                    zoneName    rotatingZone;
+
+                    patches
+                    {
+                        owner
+                        {
+                            name        nonCouple1;
+                            type        patch;
+                        }
+                        neighbour
+                        {
+                            name        nonCouple2;
+                            type        patch;
+                        }
+                    }
+                }
+            }
+            """,
+        )
+        write(
+            case / "constant" / "dynamicMeshDict",
+            f"""
+            FoamFile
+            {{
+                format      ascii;
+                class       dictionary;
+                object      dynamicMeshDict;
+            }}
+
+            mover
+            {{
+                type            motionSolver;
+                libs            ("libfvMeshMovers.so" "libfvMotionSolvers.so");
+                motionSolver    solidBody;
+                cellZone        rotatingZone;
+                solidBodyMotionFunction  rotatingMotion;
+                origin      {foam_vector(dom['origin'])};
+                axis        {foam_vector(dom['axis'])};
+                rpm         {rpm};
+            }}
+            """,
+        )
+        mrf_path = case / "constant" / "MRFProperties"
+        if mrf_path.is_file():
+            mrf_path.unlink()
+    else:
+        write(
+            case / "constant" / "MRFProperties",
+            f"""
+            FoamFile
+            {{
+                format      ascii;
+                class       dictionary;
+                object      MRFProperties;
+            }}
+
+            MRF1
+            {{
+                cellZone    rotatingZone;
+                origin      {foam_vector(dom['origin'])};
+                axis        {foam_vector(dom['axis'])};
+                rpm         {rpm};
+            }}
+            """,
+        )
+        write(
+            case / "constant" / "dynamicMeshDict",
+            """
+            FoamFile
+            {
+                format      ascii;
+                class       dictionary;
+                object      dynamicMeshDict;
+            }
+            // Static mesh — rotation handled by constant/MRFProperties
+            """,
+        )
 
     write(
         case / "constant" / "physicalProperties",
@@ -1078,7 +1192,7 @@ def main() -> None:
             nCorrectors      1;
             nNonOrthogonalCorrectors 1;
             correctPhi       yes;
-            correctMeshPhi   yes;
+            correctMeshPhi   yes;  # sliding; harmless if unused in MRF
         }
 
         relaxationFactors
@@ -1091,42 +1205,86 @@ def main() -> None:
         """,
     )
 
+
     # Mesh / run shell scripts inside the case
-    write(
-        case / "Allmesh",
-        f"""
-        #!/bin/sh
-        cd "${{0%/*}}" || exit 1
-        . "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+    if rotation_mode == "mrf":
+        if nprocs <= 1:
+            allmesh = """
+#!/bin/sh
+cd "${0%/*}" || exit 1
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+runApplication blockMesh
+runApplication surfaceFeatures
+runApplication snappyHexMesh -overwrite
+runApplication topoSet
+runApplication renumberMesh -noFields -overwrite
+"""
+            allrun = """
+#!/bin/sh
+cd "${0%/*}" || exit 1
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+if [ ! -d constant/polyMesh ]; then
+    ./Allmesh
+fi
+runApplication -a topoSet || true
+runApplication $(getApplication)
+"""
+        else:
+            allmesh = """
+#!/bin/sh
+cd "${0%/*}" || exit 1
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+runApplication blockMesh
+runApplication surfaceFeatures
+runApplication snappyHexMesh -overwrite
+runApplication topoSet
+runApplication renumberMesh -noFields -overwrite
+runApplication decomposePar -force -noFields
+"""
+            allrun = """
+#!/bin/sh
+cd "${0%/*}" || exit 1
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+if [ ! -d constant/polyMesh ]; then
+    ./Allmesh
+fi
+runApplication -a topoSet || true
+if [ ! -d processor0 ]; then
+    runApplication decomposePar -force -noFields
+fi
+runApplication -a decomposePar -fields -copyZero
+runParallel $(getApplication)
+runApplication reconstructPar -latestTime || true
+"""
+    else:
+        allmesh = """
+#!/bin/sh
+cd "${0%/*}" || exit 1
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+runApplication blockMesh
+runApplication surfaceFeatures
+runApplication decomposePar -force -noFields
+runParallel snappyHexMesh -overwrite
+runParallel createBaffles -overwrite
+runParallel splitBaffles -overwrite
+runParallel renumberMesh -noFields -overwrite
+runParallel createNonConformalCouples -overwrite nonCouple1 nonCouple2
+"""
+        allrun = """
+#!/bin/sh
+cd "${0%/*}" || exit 1
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+if [ ! -d processor0/constant/polyMesh ]; then
+    ./Allmesh
+fi
+runApplication -a decomposePar -fields -copyZero
+runParallel $(getApplication)
+runApplication reconstructPar -latestTime || true
+"""
 
-        runApplication blockMesh
-        runApplication surfaceFeatures
-        runApplication decomposePar -force -noFields
-        runParallel snappyHexMesh -overwrite
-        runParallel createBaffles -overwrite
-        runParallel splitBaffles -overwrite
-        runParallel renumberMesh -noFields -overwrite
-        # Sliding interface between rotatingZone baffles
-        runParallel createNonConformalCouples -overwrite nonCouple1 nonCouple2
-        """,
-    )
+    write(case / "Allmesh", allmesh)
     (case / "Allmesh").chmod(0o755)
-
-    write(
-        case / "Allrun",
-        f"""
-        #!/bin/sh
-        cd "${{0%/*}}" || exit 1
-        . "$WM_PROJECT_DIR/bin/tools/RunFunctions"
-
-        if [ ! -d processor0/constant/polyMesh ]; then
-            ./Allmesh
-        fi
-        runApplication -a decomposePar -fields -copyZero
-        runParallel $(getApplication)
-        runApplication reconstructPar -latestTime || true
-        """,
-    )
+    write(case / "Allrun", allrun)
     (case / "Allrun").chmod(0o755)
 
     write(
@@ -1159,11 +1317,13 @@ def main() -> None:
         "movie_fps": movie_fps,
         "nprocs": nprocs,
         "mesh_preset": os.environ.get("MESH_PRESET", "demo"),
+        "rotation_mode": rotation_mode,
         "watertight": report,
         "stators": stator_names,
     }
     (case / "pipeline_meta.json").write_text(json.dumps(meta, indent=2))
     print(f"Case written: {case}")
+    print(f"Rotation mode: {rotation_mode}")
     print(f"endTime={end_time:.6g}s ({n_rev} rev @ {rpm} rpm)")
     print(f"surface samples ≈ {n_frames} every {surf_write:.6g}s → ~{movie_dur}s movie @ {movie_fps} fps")
 

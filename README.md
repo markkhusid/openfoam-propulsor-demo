@@ -29,10 +29,13 @@ cp pipeline/config.env.example pipeline/config.env
 Supports:
 
 - Arbitrary **watertight** rotor STL (+ optional duct/stator STLs)
+- **`ROTATION_MODE=mrf`** (default, robust for pumpjets) or **`sliding`** (true mesh motion)
 - Mesh presets: `demo` | `engineering` | `fine` | `custom`
-- Movie length 10 / 30 / 60 s (surface sampling scaled to frame count)
+- Movie length 10 / 30 / 60 s (ParaView or matplotlib fallback)
 - Docker OpenFOAM 11 or native install
-- Efficiency plot \(\eta_0 = T V_a/(Q\omega)\)
+- Efficiency / thrust / torque vs time \(\eta_0 = T V_a/(Q\omega)\)
+
+Pumpjet demo: `design/` STLs + `pipeline/config.pumpjet.example.env` — see [`docs/MRF_MODE.md`](docs/MRF_MODE.md).
 
 ```
 pipeline/
