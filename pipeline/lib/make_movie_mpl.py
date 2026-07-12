@@ -9,16 +9,19 @@ from __future__ import annotations
 
 import os
 import re
+import struct
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 from matplotlib.tri import Triangulation
+from matplotlib.patches import FancyBboxPatch
 
 
 def read_legacy_vtk_polydata(path: Path) -> Dict[str, np.ndarray]:
@@ -307,39 +310,365 @@ def _meridional_coords(pts: np.ndarray, U=None, axis_i: int = 1):
     return xy, u_s, u_n, names, stream_i, span_i, drop
 
 
-def _body_silhouette(
-    tdir: Path,
+def _read_binary_stl_tris(path: Path) -> np.ndarray:
+    """Return (n, 3, 3) triangle vertex array from a binary STL."""
+    raw = Path(path).read_bytes()
+    if len(raw) < 84:
+        raise ValueError(f"STL too small: {path}")
+    n = struct.unpack_from("<I", raw, 80)[0]
+    need = 84 + n * 50
+    if len(raw) < need:
+        # ASCII or truncated — try naive ASCII parse
+        return _read_ascii_stl_tris(path)
+    tris = np.empty((n, 3, 3), dtype=np.float64)
+    off = 84
+    for i in range(n):
+        # skip normal (3 floats), read 9 vertex floats
+        vals = struct.unpack_from("<12f", raw, off)
+        tris[i, 0] = vals[3:6]
+        tris[i, 1] = vals[6:9]
+        tris[i, 2] = vals[9:12]
+        off += 50
+    return tris
+
+
+def _read_ascii_stl_tris(path: Path) -> np.ndarray:
+    text = Path(path).read_text(errors="ignore")
+    verts = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.lower().startswith("vertex"):
+            parts = line.split()
+            verts.append([float(parts[1]), float(parts[2]), float(parts[3])])
+    arr = np.asarray(verts, dtype=np.float64).reshape(-1, 3, 3)
+    return arr
+
+
+def _plane_tri_segments(
+    tris: np.ndarray,
+    normal_i: int,
+    plane: float = 0.0,
+) -> np.ndarray:
+    """
+    Intersect triangles with plane x[normal_i] = plane.
+    Returns (m, 2, 3) line segments in 3D.
+    """
+    segs = []
+    for tri in tris:
+        d = tri[:, normal_i] - plane
+        # collect edge intersection points
+        pts = []
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            da, db = d[a], d[b]
+            if abs(da) < 1e-14 and abs(db) < 1e-14:
+                # edge on plane — take both endpoints
+                pts.append(tri[a])
+                pts.append(tri[b])
+            elif da * db < 0:
+                t = da / (da - db)
+                pts.append(tri[a] + t * (tri[b] - tri[a]))
+            elif abs(da) < 1e-14:
+                pts.append(tri[a])
+            elif abs(db) < 1e-14:
+                pts.append(tri[b])
+        if len(pts) < 2:
+            continue
+        # unique points
+        P = np.asarray(pts, dtype=np.float64)
+        # keep first two sufficiently distinct points
+        used = [0]
+        for i in range(1, len(P)):
+            if np.linalg.norm(P[i] - P[used[0]]) > 1e-10:
+                used.append(i)
+                break
+        if len(used) < 2:
+            continue
+        segs.append([P[used[0]], P[used[1]]])
+    if not segs:
+        return np.zeros((0, 2, 3))
+    return np.asarray(segs, dtype=np.float64)
+
+
+def _seg_to_meridional(segs: np.ndarray, stream_i: int, span_i: int) -> np.ndarray:
+    """Map 3D segments to 2D (s, span) with s = −stream for L→R flow."""
+    if len(segs) == 0:
+        return np.zeros((0, 2, 2))
+    out = np.empty((len(segs), 2, 2), dtype=np.float64)
+    out[:, :, 0] = -segs[:, :, stream_i]
+    out[:, :, 1] = segs[:, :, span_i]
+    return out
+
+
+def _find_geometry_stls(case: Path) -> List[Path]:
+    """Locate rotor/stator STLs for clean section outlines (case first only)."""
+    found: List[Path] = []
+    names = ("rotor.stl", "stator0.stl", "duct_stator.stl", "stator.stl")
+    # 1) Explicit env paths (pipeline config) — preferred single source
+    for key in ("ROTOR_STL", "STATOR_STLS"):
+        v = os.environ.get(key, "").strip().strip('"')
+        if not v:
+            continue
+        for part in v.split():
+            p = Path(part)
+            if p.is_file():
+                found.append(p)
+    # 2) Case geometry only if no env STLs given
+    if not found:
+        for d in (case / "constant" / "geometry", case / "constant" / "triSurface"):
+            if not d.is_dir():
+                continue
+            for name in names:
+                p = d / name
+                if p.is_file():
+                    found.append(p)
+    # 3) Fallback: design/geometry_v3
+    if not found:
+        for d in (
+            case.parent.parent / "design" / "geometry_v3",
+            case.parent.parent / "design" / "geometry",
+        ):
+            if not d.is_dir():
+                continue
+            for name in names:
+                p = d / name
+                if p.is_file():
+                    found.append(p)
+    uniq = []
+    seen = set()
+    for p in found:
+        r = str(p.resolve())
+        if r not in seen:
+            seen.add(r)
+            uniq.append(p)
+    return uniq
+
+
+def _stl_meridional_sections(
+    stl_paths: List[Path],
     stream_i: int,
     span_i: int,
     normal_i: int,
-    tol: float = 0.012,
-):
-    """
-    Rotor/stator points near the meridional cut plane only.
+    plane: float = 0.0,
+) -> List[Tuple[str, np.ndarray]]:
+    """Return list of (label, segments_2d) for each STL."""
+    out = []
+    for p in stl_paths:
+        try:
+            tris = _read_binary_stl_tris(p)
+            segs3 = _plane_tri_segments(tris, normal_i, plane)
+            segs2 = _seg_to_meridional(segs3, stream_i, span_i)
+            if len(segs2):
+                label = p.stem
+                out.append((label, segs2))
+                print(f"  STL section {p.name}: {len(segs2)} segments")
+        except Exception as e:
+            print(f"  STL section skip {p}: {e}")
+    return out
 
-    Projecting the *entire* 3D rotor onto the cut axes makes a face-on star
-    (wrong plane). Restricting to |n·x| < tol gives a true side silhouette.
-    """
-    pts_list = []
-    for pat in ("rotor*", "stator*"):
-        for fp in sorted(tdir.glob(f"{pat}.vtk")):
+
+def _draw_sections(ax, sections: List[Tuple[str, np.ndarray]], zorder: int = 6):
+    """Draw CAD section linework (fallback). Prefer _draw_engineering_outline."""
+    style = {
+        "rotor": dict(color="#0d0d0d", lw=1.0, alpha=0.95),
+        "stator0": dict(color="#1a1a1a", lw=0.9, alpha=0.9),
+        "duct_stator": dict(color="#1a1a1a", lw=0.9, alpha=0.9),
+        "stator": dict(color="#1a1a1a", lw=0.9, alpha=0.9),
+    }
+    for label, segs in sections:
+        st = style.get(label, dict(color="#000000", lw=0.9, alpha=0.9))
+        for seg in segs:
+            ax.plot(seg[:, 0], seg[:, 1], solid_capstyle="round", zorder=zorder, **st)
+
+
+def _load_design_params(case: Path) -> dict:
+    for p in (
+        case.parent.parent / "design" / "geometry_v3" / "design_params.json",
+        case / "pipeline_meta.json",
+    ):
+        if p.is_file():
             try:
-                pts_list.append(read_legacy_vtk_polydata(fp)["points"])
+                import json
+
+                return json.loads(p.read_text())
             except Exception:
                 pass
-    if not pts_list:
-        return None
-    P = np.vstack(pts_list)
-    mask = np.abs(P[:, normal_i]) < tol
-    if mask.sum() < 20:
-        # relax tolerance
-        mask = np.abs(P[:, normal_i]) < max(tol * 3, 0.03)
-    if mask.sum() < 5:
-        return None
-    P = P[mask]
-    s = -P[:, stream_i]
-    n = P[:, span_i]
-    return np.column_stack([s, n])
+    return {}
+
+
+def _engineering_outline_polys(case: Path, stream_i: int = 1) -> List[dict]:
+    """
+    Build clean filled meridional solid regions for a pumpjet side view.
+
+    Coordinate system matches the movie: s = −y (flow L→R), radial = x.
+    Solids: hub cylinder section, upper/lower duct wall sections (annulus ∩ z=0).
+    Dimensions from design_params + STL axial extents only (not full blade radius).
+    """
+    # Defaults: generate_pumpjet_v3 moderate-load
+    D = 0.20
+    hub_r = 0.030
+    tip_clear = 0.004
+    R = 0.5 * D
+    y_hub0, y_hub1 = -0.018, 0.030
+    y_duct0, y_duct1 = -0.055, 0.11
+    wall = 0.012  # duct wall thickness
+
+    meta = _load_design_params(case)
+    if meta:
+        D = float(meta.get("D", D))
+        R = 0.5 * D
+        if "hub_ratio" in meta:
+            hub_r = float(meta["hub_ratio"]) * R  # hub_ratio = 2*hub_r/D → hub_r = ratio*R
+            # design stores hub_ratio = 2*hub_r/D = hub_r/R
+            hub_r = float(meta["hub_ratio"]) * R
+        if "tip_clearance_m" in meta:
+            tip_clear = float(meta["tip_clearance_m"])
+
+    # Axial extents from STL bboxes (reliable); radii from design (not blade tips)
+    stls = _find_geometry_stls(case)
+    for p in stls:
+        try:
+            tris = _read_binary_stl_tris(p)
+            mn = tris.reshape(-1, 3).min(0)
+            mx = tris.reshape(-1, 3).max(0)
+            name = p.stem.lower()
+            if "rotor" in name:
+                y_hub0, y_hub1 = float(mn[1]), float(mx[1])
+            if "stator" in name or "duct" in name:
+                y_duct0, y_duct1 = float(mn[1]), float(mx[1])
+        except Exception:
+            pass
+
+    r_tip = R - tip_clear
+    r_in = R + 0.0015  # bore slightly above tip
+    r_out = r_in + wall
+
+    # s = −y  (ensure s0 < s1)
+    s0_h, s1_h = sorted((-y_hub1, -y_hub0))
+    s0_d, s1_d = sorted((-y_duct1, -y_duct0))
+
+    polys = [
+        {
+            "name": "hub",
+            "xy": np.array(
+                [[s0_h, -hub_r], [s1_h, -hub_r], [s1_h, hub_r], [s0_h, hub_r]]
+            ),
+            "facecolor": "#2c2c32",
+            "edgecolor": "#f2f2f6",
+            "lw": 1.3,
+            "alpha": 0.95,
+        },
+        {
+            "name": "duct_upper",
+            "xy": np.array(
+                [[s0_d, r_in], [s1_d, r_in], [s1_d, r_out], [s0_d, r_out]]
+            ),
+            "facecolor": "#4a4a54",
+            "edgecolor": "#f2f2f6",
+            "lw": 1.2,
+            "alpha": 0.93,
+        },
+        {
+            "name": "duct_lower",
+            "xy": np.array(
+                [[s0_d, -r_out], [s1_d, -r_out], [s1_d, -r_in], [s0_d, -r_in]]
+            ),
+            "facecolor": "#4a4a54",
+            "edgecolor": "#f2f2f6",
+            "lw": 1.2,
+            "alpha": 0.93,
+        },
+    ]
+    # Rotor plane marker (blade disk)
+    s_rotor = 0.5 * (s0_h + s1_h)
+    polys.append(
+        {
+            "name": "rotor_disk_guide",
+            "type": "vlines",
+            "s": s_rotor,
+            "x0": -r_tip,
+            "x1": r_tip,
+        }
+    )
+    return polys
+
+
+def _draw_engineering_outline(
+    ax,
+    case: Path,
+    sections: List[Tuple[str, np.ndarray]],
+    zorder: int = 7,
+):
+    """Filled hub + duct walls + fine STL blade/cut linework."""
+    from matplotlib.patches import Polygon
+
+    for poly in _engineering_outline_polys(case):
+        if poly.get("type") == "vlines":
+            ax.plot(
+                [poly["s"], poly["s"]],
+                [poly["x0"], poly["x1"]],
+                color="#ffdd88",
+                ls="--",
+                lw=0.9,
+                alpha=0.75,
+                zorder=zorder + 1,
+            )
+            continue
+        patch = Polygon(
+            poly["xy"],
+            closed=True,
+            facecolor=poly["facecolor"],
+            edgecolor=poly["edgecolor"],
+            linewidth=poly["lw"],
+            alpha=poly["alpha"],
+            zorder=zorder,
+            joinstyle="round",
+        )
+        ax.add_patch(patch)
+
+    # Blade cuts only: STL segments with mid-radius between hub and duct bore
+    hub_r_est = 0.03
+    r_bore = 0.10
+    for label, segs in sections:
+        if "rotor" not in label.lower():
+            continue
+        for seg in segs:
+            rmid = 0.5 * (abs(seg[0, 1]) + abs(seg[1, 1]))
+            if rmid < hub_r_est * 1.15 or rmid > r_bore * 0.98:
+                continue  # skip hub skin / outer tips clutter
+            ax.plot(
+                seg[:, 0],
+                seg[:, 1],
+                color="#ffe0a0",
+                lw=1.0,
+                alpha=0.9,
+                solid_capstyle="round",
+                zorder=zorder + 2,
+            )
+
+    ax.text(
+        0.0,
+        0.0,
+        "hub",
+        color="#ffffff",
+        fontsize=7,
+        ha="center",
+        va="center",
+        zorder=zorder + 3,
+        alpha=0.95,
+        fontweight="bold",
+    )
+    # duct labels in main axes only if wide enough
+    ax.text(
+        0.0,
+        0.11,
+        "duct",
+        color="#dde0e8",
+        fontsize=6.5,
+        ha="center",
+        va="bottom",
+        zorder=zorder + 3,
+        alpha=0.85,
+    )
 
 
 def main():
@@ -414,10 +743,44 @@ def main():
     h = int(os.environ.get("MOVIE_HEIGHT", 720))
     dpi = 100
     fig_w, fig_h = w / dpi, h / dpi
-    # Quiver arrows off by default — they clutter the through-flow view.
     show_quiver = os.environ.get("MOVIE_QUIVER", "0") in ("1", "true", "yes")
     # Shaft / advance axis index (y=1 for this pumpjet pipeline)
     axis_i = int(os.environ.get("MOVIE_AXIS_INDEX", "1"))
+    # Engineering layout: full domain + optional zoom inset on the unit
+    show_inset = os.environ.get("MOVIE_INSET", "1") in ("1", "true", "yes")
+
+    # Probe first frame for axis mapping, then build CAD sections once
+    d0 = read_legacy_vtk_polydata(times[0][1] / f"{sample_name}.vtk")
+    U0 = d0["data"].get("U")
+    if U0 is not None:
+        U0 = np.asarray(U0).reshape(-1, 3)
+    _, _, _, axis_labels, stream_i, span_i, normal_i = _meridional_coords(
+        d0["points"], U0, axis_i=axis_i
+    )
+    print(
+        f"Meridional map: stream={'xyz'[stream_i]}  span={'xyz'[span_i]}  "
+        f"normal={'xyz'[normal_i]}  (flow left→right)"
+    )
+    stl_paths = _find_geometry_stls(case)
+    print("Geometry STLs for section:", [str(p) for p in stl_paths])
+    sections = _stl_meridional_sections(stl_paths, stream_i, span_i, normal_i, plane=0.0)
+    if not sections:
+        print("WARNING: no STL sections — pumpjet outline will be missing")
+
+    # Zoom box around geometry from STL segments
+    if sections:
+        all_s = np.concatenate([sg[:, :, 0].ravel() for _, sg in sections])
+        all_n = np.concatenate([sg[:, :, 1].ravel() for _, sg in sections])
+        pad_s = 0.08
+        pad_n = 0.04
+        zoom = (
+            float(all_s.min()) - pad_s,
+            float(all_s.max()) + pad_s,
+            float(all_n.min()) - pad_n,
+            float(all_n.max()) + pad_n,
+        )
+    else:
+        zoom = (-0.25, 0.25, -0.18, 0.18)
 
     for fi, (tval, tdir) in enumerate(times):
         fpath = tdir / f"{sample_name}.vtk"
@@ -434,18 +797,18 @@ def main():
             pts, U, axis_i=axis_i
         )
 
-        # Color by streamwise speed (distinct freestream → acceleration through jet)
+        # Color by streamwise speed
         if u_s is not None:
             scalar = u_s
-            label = r"streamwise speed $u_s=-U_y$ [m/s]"
+            label = r"streamwise speed $u_s=-U_y$  [m/s]"
             cmin, cmax = ua_lo, ua_hi
         else:
             scalar, label = scalar_from_data(data)
             cmin, cmax = vmin, vmax
 
         fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
-        fig.patch.set_facecolor("#070b10")
-        ax.set_facecolor("#0c121a")
+        fig.patch.set_facecolor("#0b1018")
+        ax.set_facecolor("#101820")
 
         if len(tris) > 0 and tris.max() < len(pts):
             tri = Triangulation(xy[:, 0], xy[:, 1], tris)
@@ -456,10 +819,10 @@ def main():
                 ax.tricontour(
                     tri,
                     scalar,
-                    levels=10,
+                    levels=14,
                     colors="white",
-                    linewidths=0.3,
-                    alpha=0.30,
+                    linewidths=0.28,
+                    alpha=0.28,
                 )
             except Exception:
                 pass
@@ -468,8 +831,16 @@ def main():
                 xy[:, 0], xy[:, 1], c=scalar, s=6, cmap="turbo", vmin=cmin, vmax=cmax
             )
 
+        # Engineering meridional outline: filled hub + duct walls + blade cuts
+        _draw_engineering_outline(ax, case, sections, zorder=7)
+
+        # Shaft centreline
+        smin, smax = float(xy[:, 0].min()), float(xy[:, 0].max())
+        nmin, nmax = float(xy[:, 1].min()), float(xy[:, 1].max())
+        ax.axhline(0.0, color="#8899aa", ls="--", lw=0.6, alpha=0.55, zorder=4)
+
         if show_quiver and u_s is not None and u_n is not None and len(xy) > 20:
-            nq = min(450, len(xy))
+            nq = min(350, len(xy))
             order = np.argsort(xy[:, 0])
             stride = max(1, len(order) // nq)
             idx = order[::stride][:nq]
@@ -481,65 +852,116 @@ def main():
                 u_s[idx] / scale_ref,
                 u_n[idx] / scale_ref,
                 color="white",
-                alpha=0.75,
-                scale=28,
-                width=0.0022,
-                headwidth=3.5,
-                headlength=4.0,
+                alpha=0.55,
+                scale=32,
+                width=0.0018,
+                headwidth=3.2,
+                headlength=3.5,
                 pivot="mid",
-                zorder=6,
+                zorder=5,
             )
 
-        # Side-view silhouette only (same meridional plane as the cut)
-        bxy = _body_silhouette(tdir, stream_i, span_i, normal_i)
-        if bxy is not None and len(bxy):
-            ax.scatter(bxy[:, 0], bxy[:, 1], s=1.5, c="#0a0a0a", alpha=0.75, zorder=5)
-
-        smin, smax = float(xy[:, 0].min()), float(xy[:, 0].max())
-        nmin, nmax = float(xy[:, 1].min()), float(xy[:, 1].max())
-        y_ann = nmax - 0.04 * (nmax - nmin + 1e-12)
+        y_ann = nmax - 0.05 * (nmax - nmin + 1e-12)
         for xpos, txt in (
-            (smin + 0.08 * (smax - smin), "INLET →"),
+            (smin + 0.10 * (smax - smin), "INLET  →"),
             (0.5 * (smin + smax), "PUMPJET"),
-            (smax - 0.12 * (smax - smin), "→ WAKE"),
+            (smax - 0.12 * (smax - smin), "→  WAKE / JET"),
         ):
             ax.text(
                 xpos,
                 y_ann,
                 txt,
-                color="#e8f0ff",
+                color="#f0f4ff",
                 fontsize=11,
                 ha="center",
                 va="top",
                 fontweight="bold",
-                alpha=0.9,
-                zorder=8,
+                alpha=0.95,
+                zorder=9,
+                bbox=dict(
+                    boxstyle="round,pad=0.25",
+                    facecolor="#0b1018",
+                    edgecolor="#445566",
+                    alpha=0.75,
+                ),
             )
 
-        cb = fig.colorbar(tcf, ax=ax, fraction=0.035, pad=0.02)
-        cb.set_label(label, color="white")
+        # Rectangle marking the unit for the team
+        if sections:
+            ax.add_patch(
+                plt.Rectangle(
+                    (zoom[0], zoom[2]),
+                    zoom[1] - zoom[0],
+                    zoom[3] - zoom[2],
+                    fill=False,
+                    edgecolor="#ffcc66",
+                    lw=1.0,
+                    ls=":",
+                    alpha=0.7,
+                    zorder=8,
+                )
+            )
+
+        cb = fig.colorbar(tcf, ax=ax, fraction=0.032, pad=0.02)
+        cb.set_label(label, color="white", fontsize=10)
         cb.ax.yaxis.set_tick_params(color="white")
         plt.setp(plt.getp(cb.ax.axes, "yticklabels"), color="white")
 
         ax.set_aspect("equal", adjustable="box")
         ax.set_title(
-            f"Pumpjet V3 MRF — meridional through-flow ({sample_name})   t = {tval:.5g} s",
+            f"Pumpjet V3 — meridional section through shaft  |  t = {tval:.5g} s  |  MRF, 6-proc",
             color="white",
             fontsize=12,
+            pad=10,
         )
-        ax.set_xlabel(f"{axis_labels[0]}   (flow left → right)", color="white")
-        ax.set_ylabel(axis_labels[1], color="white")
-        ax.tick_params(colors="white")
+        ax.set_xlabel(
+            r"streamwise $s=-y$ [m]   (freestream left $\rightarrow$ jet right)",
+            color="white",
+            fontsize=10,
+        )
+        ax.set_ylabel(r"radial $x$ [m]   (shaft on $x=0$)", color="white", fontsize=10)
+        ax.tick_params(colors="white", labelsize=9)
         for spine in ax.spines.values():
-            spine.set_color("#445566")
-        fig.tight_layout()
-        fig.savefig(frames_dir / f"frame_{fi:04d}.png", dpi=dpi, facecolor=fig.get_facecolor())
+            spine.set_color("#556677")
+
+        # Inset: zoom on pumpjet with same field + CAD section
+        if show_inset and sections:
+            from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+
+            axins = inset_axes(ax, width="38%", height="48%", loc="lower left", borderpad=1.2)
+            axins.set_facecolor("#101820")
+            if len(tris) > 0 and tris.max() < len(pts):
+                axins.tripcolor(
+                    tri, scalar, shading="gouraud", cmap="turbo", vmin=cmin, vmax=cmax
+                )
+            _draw_engineering_outline(axins, case, sections, zorder=7)
+            axins.axhline(0.0, color="#8899aa", ls="--", lw=0.5, alpha=0.5)
+            axins.set_xlim(zoom[0], zoom[1])
+            axins.set_ylim(zoom[2], zoom[3])
+            axins.set_aspect("equal", adjustable="box")
+            axins.set_title("detail", color="#ffcc66", fontsize=9, pad=2)
+            axins.tick_params(colors="white", labelsize=7)
+            for spine in axins.spines.values():
+                spine.set_color("#ffcc66")
+                spine.set_linewidth(1.2)
+
+        try:
+            fig.tight_layout()
+        except Exception:
+            pass
+        fig.savefig(
+            frames_dir / f"frame_{fi:04d}.png",
+            dpi=dpi,
+            facecolor=fig.get_facecolor(),
+            bbox_inches="tight",
+            pad_inches=0.15,
+        )
         plt.close(fig)
         if fi % 10 == 0:
             print(
                 f"frame {fi}/{len(times)} t={tval}  "
-                f"srange={scalar.min():.3g}..{scalar.max():.3g}  "
-                f"axes stream={'xyz'[stream_i]} span={'xyz'[span_i]}"
+                f"srange={float(np.min(scalar)):.3g}..{float(np.max(scalar)):.3g}  "
+                f"stream={'xyz'[stream_i]} span={'xyz'[span_i]}"
             )
 
     n = len(list(frames_dir.glob("frame_*.png")))

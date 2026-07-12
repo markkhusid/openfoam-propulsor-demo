@@ -1,5 +1,19 @@
 # Pumpjet MRF V3 (corrected view + force review)
 
+
+## Visualization (engineering movie)
+
+`pumpjet_flow_20s.mp4` is a **meridional section through the shaft** (side view):
+
+- Horizontal: streamwise \(s=-y\) (inlet left → jet/wake right)
+- Vertical: radial \(x\) (shaft on \(x=0\))
+- **Hub** = filled rectangle on axis (cylinder cut by the plane)
+- **Duct** = upper and lower thin wall sections (annulus cut by the plane) — the
+  classic “two rails + hub” look of a pumpjet in section, **not** a face-on prop
+- Yellow dashed line = rotor disk plane (blade radial extent)
+- Inset zoom for unit detail; no quiver arrows
+
+
 ## Fixes in this revision
 
 ### 1. Movie plane (was wrong silhouette)
